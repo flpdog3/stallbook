@@ -155,8 +155,11 @@ h1,h2,h3{margin:0;font-family:var(--display);font-weight:700}
 }
 .thumb{flex:0 0 auto;border-radius:20px;background:var(--sand) center/cover no-repeat;box-shadow:inset 0 0 0 1px rgba(0,0,0,.05)}
 .thumb.empty{display:flex;align-items:center;justify-content:center;color:rgba(120,105,85,.4);background:var(--sand);box-shadow:none}
-.tile .thumb.sw{width:72px;height:72px;border-radius:18px}
-.pcard .thumb.sw{width:64px;height:64px;border-radius:16px}
+/* card pictures fill the card's width as a square — the framer (Move or zoom)
+   decides which square of the photo that is */
+.tile .thumb.sw{width:100%;height:auto;aspect-ratio:1/1;border-radius:18px}
+.pcard .thumb.sw{width:100%;height:auto;aspect-ratio:1/1;border-radius:16px}
+.thumb.sw.empty svg{width:34%;height:34%}
 .shead .thumb.sw{width:54px;height:54px;border-radius:14px}
 .dot{border-radius:50% 50% 50% 38%;box-shadow:var(--sheen);flex:0 0 auto;display:inline-block}
 
@@ -545,6 +548,19 @@ select{
   display:flex;align-items:center;justify-content:center;
   font-family:var(--display);font-weight:700;color:var(--ink-mute);
 }
+/* photo framer */
+.cropper{z-index:80}
+.xbtn[hidden]{display:none}
+.cropbox{
+  position:relative;width:100%;max-width:420px;aspect-ratio:1/1;margin:0 auto;overflow:hidden;
+  border-radius:24px;background:var(--sand);touch-action:none;cursor:grab;user-select:none;-webkit-user-select:none;
+}
+.cropbox:active{cursor:grabbing}
+.cropbox img{position:absolute;left:0;top:0;max-width:none;transform-origin:0 0;pointer-events:none;-webkit-user-drag:none}
+.cropbox::after{content:"";position:absolute;inset:0;border-radius:inherit;box-shadow:inset 0 0 0 2px rgba(255,255,255,.75);pointer-events:none}
+.cropzoom{display:flex;align-items:center;gap:12px;max-width:420px;margin:14px auto 0}
+.cropzoom input{flex:1;accent-color:var(--green)}
+.cropnote{text-align:center;max-width:420px;margin:12px auto 0}
 .stars{display:flex;gap:4px;align-items:center;flex-wrap:wrap}
 .stars button{font-size:30px;line-height:1;color:var(--sand-3);padding:2px 3px}
 .stars button[aria-pressed="true"]{color:var(--warn-ink)}

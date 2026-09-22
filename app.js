@@ -110,6 +110,7 @@ function itemColor(item, opts) {
    placeholder if not, so every card lines up and adding a photo later just
    fills the gap. Sheet headers only show a real photo. */
 const ICON_PHOTO = '<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="5" width="17" height="14" rx="3.5"></rect><circle cx="9" cy="10" r="1.6"></circle><path d="M5 17l4.5-4.5 3 3 2.5-2.5 4 4"></path></svg>';
+const ICON_CROP = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2.5V16a2 2 0 0 0 2 2h13.5"></path><path d="M2.5 6H16a2 2 0 0 1 2 2v13.5"></path></svg>';
 const thumb = (thing, cls, spot) => thing && thing.photo
   ? `<span class="thumb ${cls || ""}" style="background-image:url('${thing.photo}')"></span>`
   : spot ? `<span class="thumb empty ${cls || ""}" aria-hidden="true">${ICON_PHOTO}</span>` : "";
@@ -3712,6 +3713,7 @@ function materialSheet(existing) {
         <div class="rowf" style="align-items:center">
           <span class="av" id="mPrev" style="flex:0 0 64px;${m.photo ? `background-image:url('${m.photo}')` : ""}"></span>
           <input type="file" id="mFile" accept="image/*" style="flex:1;border:0;padding:0;background:none">
+          <button class="xbtn" id="mAdjust" aria-label="Move or zoom the photo" title="Move or zoom"${m.photo ? "" : " hidden"}>${ICON_CROP}</button>
           <button class="xbtn" id="mClearPhoto" aria-label="Remove photo">✕</button>
         </div></label>
       <div class="rowf">
@@ -3849,12 +3851,7 @@ function materialSheet(existing) {
     if ($("#catBox")) drawCat();
 
     if ($("#mSell")) $("#mSell").onclick = () => { readDetails(); m.forSale = !forSale(m); draw(); };
-    if ($("#mClearPhoto")) $("#mClearPhoto").onclick = () => { m.photo = ""; $("#mPrev").style.backgroundImage = ""; };
-    if ($("#mFile")) $("#mFile").onchange = async e => {
-      const f = e.target.files[0]; if (!f) return;
-      m.photo = await shrink(f);
-      $("#mPrev").style.backgroundImage = `url('${m.photo}')`;
-    };
+    wirePhoto(m, "m");
     if ($("#mOn")) $("#mOn").onclick = () => { readDetails(); m.active = true; draw(); };
     if ($("#mOff")) $("#mOff").onclick = () => { readDetails(); m.active = false; draw(); };
     if ($("#mUnit")) $("#mUnit").onchange = () => redraw();
@@ -4081,6 +4078,7 @@ function itemSheet(item) {
         <div class="rowf" style="align-items:center">
           <span class="av" id="iPrev" style="flex:0 0 64px;${it.photo ? `background-image:url('${it.photo}')` : ""}"></span>
           <input type="file" id="iFile" accept="image/*" style="flex:1;border:0;padding:0;background:none">
+          <button class="xbtn" id="iAdjust" aria-label="Move or zoom the photo" title="Move or zoom"${it.photo ? "" : " hidden"}>${ICON_CROP}</button>
           <button class="xbtn" id="iClearPhoto" aria-label="Remove photo">✕</button>
         </div></label>
 
@@ -4248,12 +4246,7 @@ function itemSheet(item) {
       if (stored) { stored.stockMode = it.stockMode; await saveItems(); refreshLists(); }
     };
     $("#iMto").onclick = () => { readTop(); it.madeToOrder = !it.madeToOrder; draw(); };
-    $("#iClearPhoto").onclick = () => { it.photo = ""; $("#iPrev").style.backgroundImage = ""; };
-    $("#iFile").onchange = async e => {
-      const f = e.target.files[0]; if (!f) return;
-      it.photo = await shrink(f);
-      $("#iPrev").style.backgroundImage = `url('${it.photo}')`;
-    };
+    wirePhoto(it, "i");
   };
 
   draw();
@@ -4290,17 +4283,17 @@ function itemSheet(item) {
   });
 }
 
-function shrink(file) {
+function shrink(file, max, quality) {
   return new Promise(res => {
     const r = new FileReader();
     r.onload = () => {
       const img = new Image();
       img.onload = () => {
-        const M = 520, sc = Math.min(1, M / Math.max(img.width, img.height));
+        const M = max || 520, sc = Math.min(1, M / Math.max(img.width, img.height));
         const c = document.createElement("canvas");
         c.width = Math.round(img.width * sc); c.height = Math.round(img.height * sc);
         c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
-        res(c.toDataURL("image/jpeg", 0.72));
+        res(c.toDataURL("image/jpeg", quality || 0.72));
       };
       img.onerror = () => res("");
       img.src = r.result;
@@ -5595,6 +5588,7 @@ function assetSheet(existing) {
         <div class="rowf" style="align-items:center">
           <span class="av" id="gPrev" style="flex:0 0 64px;min-width:0;${a.photo ? `background-image:url('${a.photo}')` : ""}"></span>
           <input type="file" id="gFile" accept="image/*" style="flex:1;border:0;padding:0;background:none">
+          <button class="xbtn" id="gAdjust" aria-label="Move or zoom the photo" title="Move or zoom" style="flex:0 0 44px;min-width:0"${a.photo ? "" : " hidden"}>${ICON_CROP}</button>
           <button class="xbtn" id="gClearPhoto" aria-label="Remove photo" style="flex:0 0 44px;min-width:0">✕</button>
         </div></label>
       <div class="rowf">
@@ -5654,12 +5648,7 @@ function assetSheet(existing) {
     $("#gQty").oninput = showTotal;
     $("#gCost").oninput = showTotal;
     showTotal();
-    $("#gClearPhoto").onclick = () => { a.photo = ""; $("#gPrev").style.backgroundImage = ""; };
-    $("#gFile").onchange = async e => {
-      const f = e.target.files[0]; if (!f) return;
-      a.photo = await shrink(f);
-      $("#gPrev").style.backgroundImage = `url('${a.photo}')`;
-    };
+    wirePhoto(a, "g");
     document.querySelectorAll("[data-cond]").forEach(b => b.onclick = () => { read(); a.condition = b.dataset.cond; draw(); });
     $("#gOn").onclick = () => { read(); a.retired = false; draw(); };
     $("#gOff").onclick = () => { read(); a.retired = true; draw(); };
@@ -5701,6 +5690,180 @@ function assetSheet(existing) {
       }
     });
   };
+}
+
+/* ---------------------------- photo framing ----------------------------
+   A picked photo is kept twice: photoFull (the whole picture, up to 1200px)
+   and photo (the square the cards show). photoFrame remembers where the
+   square sits — zoom z (1 = whole short side fits) and centre cx/cy as
+   fractions of the picture — so reopening the framer starts where you left
+   it and re-framing never loses the edges of the original. Photos saved
+   before this existed have no photoFull; their current square becomes the
+   "whole picture" the first time they're adjusted. */
+function wirePhoto(obj, p) {
+  const prev = $(`#${p}Prev`), file = $(`#${p}File`), clr = $(`#${p}ClearPhoto`), adj = $(`#${p}Adjust`);
+  if (!prev) return;
+  const show = () => {
+    prev.style.backgroundImage = obj.photo ? `url('${obj.photo}')` : "";
+    if (adj) adj.hidden = !obj.photo;
+  };
+  const adjust = async () => {
+    if (!obj.photo) return;
+    const src = obj.photoFull || obj.photo;
+    const r = await cropPhoto(src, obj.photoFull ? obj.photoFrame : null);
+    if (!r) return;
+    obj.photoFull = src; obj.photo = r.photo; obj.photoFrame = r.frame; show();
+  };
+  // the preview sits inside the Photo label, so a tap on it would normally open
+  // the file picker; with a photo already there it opens the framer instead
+  prev.style.cursor = "pointer";
+  prev.onclick = e => { if (obj.photo) { e.preventDefault(); adjust(); } };
+  if (adj) adj.onclick = e => { e.preventDefault(); adjust(); };
+  if (clr) clr.onclick = e => {
+    e.preventDefault();
+    obj.photo = ""; delete obj.photoFull; delete obj.photoFrame; show();
+  };
+  if (file) file.onchange = async e => {
+    const f = e.target.files[0]; if (!f) return;
+    e.target.value = "";   // lets the same picture be picked again
+    const full = await shrink(f, 1200, 0.82);
+    if (!full) { toast("That picture couldn't be opened — try a JPEG or PNG"); return; }
+    const r = await cropPhoto(full, null);
+    if (!r) return;        // cancelled: keep whatever was there before
+    obj.photoFull = full; obj.photo = r.photo; obj.photoFrame = r.frame; show();
+  };
+}
+
+function cropPhoto(src, frame) {
+  return new Promise(resolve => {
+    const img = new Image();
+    img.onerror = () => resolve(null);
+    img.onload = () => openCropper(img, src, frame, resolve);
+    img.src = src;
+  });
+}
+
+function openCropper(img, src, frame, resolve) {
+  const W = img.naturalWidth, H = img.naturalHeight, mn = Math.min(W, H);
+  const MAXZ = 5, OUT = 600;
+  const MINZ = mn / Math.max(W, H);              // zoomed out far enough to see the whole picture
+  const start = { z: 1, cx: 0.5, cy: 0.5 };
+  let f = { ...start, ...(frame || {}) };
+
+  const w = document.createElement("div");
+  w.className = "scrim confirm cropper";
+  w.innerHTML = `<div class="sheet narrow" role="dialog" aria-modal="true" aria-label="Frame the photo">
+    <div class="shead"><h3>Frame the photo</h3>
+      <button class="pebble lg" data-x aria-label="Cancel">${ICON.close}</button></div>
+    <div class="sbody">
+      <div class="cropbox"><img alt="" draggable="false"></div>
+      <div class="cropzoom">
+        <button class="xbtn" data-zo aria-label="Zoom out">−</button>
+        <input type="range" min="${MINZ}" max="${MAXZ}" step="0.01" aria-label="Zoom">
+        <button class="xbtn" data-zi aria-label="Zoom in">+</button>
+      </div>
+      <p class="note cropnote">Drag to move the picture, pinch or use the slider to zoom. What's in the square is what the card shows.</p>
+    </div>
+    <div class="sfoot stack">
+      <button class="btn sec" data-all>Show it all</button>
+      <button class="btn sec" data-reset>Fill the square</button>
+      <button class="btn" data-use>Use this</button>
+    </div>
+  </div>`;
+  document.body.appendChild(w);
+  const box = w.querySelector(".cropbox"), el = box.querySelector("img"), zr = w.querySelector("input[type=range]");
+  el.src = src;
+
+  const V = () => box.clientWidth || 300;
+  const scale = () => f.z * V() / mn;           // screen px per picture px
+  const clamp = () => {
+    f.z = Math.min(MAXZ, Math.max(MINZ, f.z));
+    const half = mn / f.z / 2;                    // half the square's side, in picture px
+    // an edge of the picture can't come inside the square — unless the picture
+    // is narrower than the square that way, and then it just sits in the middle
+    f.cx = half * 2 >= W ? 0.5 : Math.min(1 - half / W, Math.max(half / W, f.cx));
+    f.cy = half * 2 >= H ? 0.5 : Math.min(1 - half / H, Math.max(half / H, f.cy));
+  };
+  const paint = () => {
+    clamp();
+    const s = scale(), v = V();
+    el.style.width = W * s + "px"; el.style.height = H * s + "px";
+    el.style.transform = `translate(${v / 2 - f.cx * W * s}px, ${v / 2 - f.cy * H * s}px)`;
+    zr.value = f.z;
+  };
+  // zoom keeping the picture point under (px,py) — box coords — where it is
+  const zoomAt = (nz, px, py) => {
+    const v = V(), s0 = scale();
+    const ix = f.cx * W + (px - v / 2) / s0, iy = f.cy * H + (py - v / 2) / s0;
+    f.z = Math.min(MAXZ, Math.max(MINZ, nz));
+    const s1 = scale();
+    f.cx = (ix - (px - v / 2) / s1) / W; f.cy = (iy - (py - v / 2) / s1) / H;
+    paint();
+  };
+
+  const pts = new Map();
+  let g = null;   // gesture start
+  const snap = () => {
+    const r = box.getBoundingClientRect(), a = [...pts.values()];
+    const mx = a.reduce((t, p) => t + p.x, 0) / a.length - r.left;
+    const my = a.reduce((t, p) => t + p.y, 0) / a.length - r.top;
+    const d = a.length > 1 ? Math.hypot(a[0].x - a[1].x, a[0].y - a[1].y) : 0;
+    return { mx, my, d };
+  };
+  const begin = () => { g = { ...snap(), f: { ...f } }; };
+  box.addEventListener("pointerdown", e => {
+    box.setPointerCapture(e.pointerId);
+    pts.set(e.pointerId, { x: e.clientX, y: e.clientY }); begin();
+  });
+  box.addEventListener("pointermove", e => {
+    if (!pts.has(e.pointerId) || !g) return;
+    pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    const now = snap();
+    f = { ...g.f };
+    if (now.d && g.d) zoomAt(g.f.z * now.d / g.d, g.mx, g.my);
+    const s = scale();
+    f.cx -= (now.mx - g.mx) / s / W; f.cy -= (now.my - g.my) / s / H;
+    paint();
+  });
+  const lift = e => { pts.delete(e.pointerId); if (pts.size) begin(); else g = null; };
+  box.addEventListener("pointerup", lift);
+  box.addEventListener("pointercancel", lift);
+  box.addEventListener("wheel", e => {
+    e.preventDefault();
+    const r = box.getBoundingClientRect();
+    zoomAt(f.z * Math.exp(-e.deltaY * 0.0022), e.clientX - r.left, e.clientY - r.top);
+  }, { passive: false });
+  zr.oninput = () => zoomAt(+zr.value, V() / 2, V() / 2);
+  w.querySelector("[data-zo]").onclick = () => zoomAt(f.z / 1.25, V() / 2, V() / 2);
+  w.querySelector("[data-zi]").onclick = () => zoomAt(f.z * 1.25, V() / 2, V() / 2);
+  w.querySelector("[data-reset]").onclick = () => { f = { ...start }; paint(); };
+  w.querySelector("[data-all]").onclick = () => { f = { z: MINZ, cx: 0.5, cy: 0.5 }; paint(); };
+
+  const onKey = e => { if (e.key === "Escape") { e.stopPropagation(); done(null); } };
+  const onResize = () => paint();
+  window.addEventListener("keydown", onKey, true);
+  window.addEventListener("resize", onResize);
+  function done(result) {
+    window.removeEventListener("keydown", onKey, true);
+    window.removeEventListener("resize", onResize);
+    w.remove(); resolve(result);
+  }
+  w.querySelector("[data-x]").onclick = () => done(null);
+  w.addEventListener("click", e => { if (e.target === w) done(null); });
+  w.querySelector("[data-use]").onclick = () => {
+    clamp();
+    const side = mn / f.z, o = Math.max(1, Math.min(OUT, Math.round(side)));
+    const c = document.createElement("canvas");
+    c.width = c.height = o;
+    const k = o / side, x = c.getContext("2d");
+    x.fillStyle = getComputedStyle(document.documentElement).getPropertyValue("--sand").trim() || "#f3efe6";
+    x.fillRect(0, 0, o, o);                     // shows around a zoomed-out picture
+    x.drawImage(img, (side / 2 - f.cx * W) * k, (side / 2 - f.cy * H) * k, W * k, H * k);
+    const r4 = n => Math.round(n * 10000) / 10000;
+    done({ photo: c.toDataURL("image/jpeg", 0.82), frame: { z: r4(f.z), cx: r4(f.cx), cy: r4(f.cy) } });
+  };
+  requestAnimationFrame(paint);
+  if (el.complete) paint(); else el.onload = paint;
 }
 
 /* ---------------------------- sheet + toast ---------------------------- */
