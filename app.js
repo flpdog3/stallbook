@@ -37,7 +37,7 @@ const saleDel = id => req(tx("sales", "readwrite").delete(id));
 /* ---------------------------- state ---------------------------- */
 const S = {
   items: [], materials: [], categories: [], productTypes: [], events: [], days: [], sales: [], cart: [],
-  lots: [], writeoffs: [], reversals: [], trash: [], orders: [],
+  lots: [], writeoffs: [], reversals: [], trash: [], orders: [], assets: [], cash: [],
   tickets: [], activeTicket: null,
   settings: { currency: "$", activeDay: null, lastBackup: null },
   tab: "sell"
@@ -64,8 +64,10 @@ async function setTypeActive(cat, on) {
 }
 const saveTrash = () => kvSet("trash", S.trash);
 const saveOrders = () => kvSet("orders", S.orders);
+const saveAssets = () => kvSet("assets", S.assets);
+const saveCash = () => kvSet("cash", S.cash);
 const saveTickets = () => kvSet("tickets", { tickets: S.tickets, active: S.activeTicket });
-const saveEvents = () => kvSet("events", S.events);
+const saveEvents = () => { stampPaid(false); return kvSet("events", S.events); };
 const saveDays = () => kvSet("days", S.days);
 const saveSettings = () => kvSet("settings", S.settings);
 const saveLots = () => kvSet("lots", S.lots);
@@ -120,6 +122,7 @@ const ICON = {
   days: '<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="5.5" width="17" height="15" rx="4.5"></rect><path d="M3.5 10.5h17M8.5 3.5v4M15.5 3.5v4"></path></svg>',
   money: '<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19c3-.4 4.6-2.2 6-6s3-6.4 6-7"></path><path d="M4 5v14h16"></path></svg>',
   safe: '<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5c4.7 0 8.5 1.6 8.5 3.5v10c0 1.9-3.8 3.5-8.5 3.5S3.5 18.9 3.5 17V7c0-1.9 3.8-3.5 8.5-3.5z"></path><path d="M3.5 7c0 1.9 3.8 3.5 8.5 3.5S20.5 8.9 20.5 7"></path></svg>',
+  gear: '<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8.5h18"></path><path d="M4.5 8.5 3.5 13h17l-1-4.5"></path><path d="M6 13v7M18 13v7M6 16.5h12"></path><path d="M9 8.5V5.5a3 3 0 0 1 6 0v3"></path></svg>',
   stock: '<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8.5 12 4l8 4.5v7L12 20l-8-4.5z"></path><path d="M4 8.5 12 13l8-4.5M12 13v7"></path></svg>',
   close: '<svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"></path></svg>',
   closeSm: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"></path></svg>'
@@ -129,8 +132,9 @@ const TABS = [
   { id: "sell", label: "Sell", kicker: "Tap a balloon", title: "Who's next?", icon: ICON.sell },
   { id: "items", label: "Make", kicker: "", title: "Things I make", icon: ICON.items },
   { id: "stock", label: "Inventory", kicker: "", title: "Inventory", icon: ICON.stock },
+  { id: "gear", label: "Equipment", kicker: "Not for sale — what the stall is built from", title: "Stall equipment", icon: ICON.gear },
   { id: "events", label: "Events", kicker: "Registrations, bookings and selling days", title: "Events", icon: ICON.days },
-  { id: "reports", label: "Reports", kicker: "Takings and write-offs", title: "How it's going", icon: ICON.money },
+  { id: "reports", label: "Reports", kicker: "Takings, write-offs and cash flow", title: "How it's going", icon: ICON.money },
   { id: "data", label: "Safe", kicker: "Never lose a summer", title: "Keep it safe", icon: ICON.safe }
 ];
 const panelOf = id => $("#p" + id[0].toUpperCase() + id.slice(1));
@@ -894,6 +898,8 @@ function defaultPicks(item) {
   S.productTypes = (await kvGet("productTypes")) || [];
   S.trash = (await kvGet("trash")) || [];
   S.orders = (await kvGet("orders")) || [];
+  S.assets = (await kvGet("assets")) || [];
+  S.cash = (await kvGet("cash")) || [];
   const tk = (await kvGet("tickets")) || {};
   S.tickets = tk.tickets || [];
   S.activeTicket = tk.active || null;
@@ -972,8 +978,22 @@ async function migrate() {
    application carrying those details, and its selling days hang off that. */
 const APP_FIELDS = ["fee", "loadIn", "startTime", "endTime", "boothSize", "venue",
                     "power", "tableProvided", "tent", "rating", "review", "notes"];
-async function migrateEvents() {
+/* When a stall fee was paid is what dates it in the cash flow. New bookings
+   are stamped the day they're marked paid; ones from before this existed take
+   their first selling day, which is the best guess there is. */
+function stampPaid(legacy) {
   let touched = false;
+  for (const ev of S.events) for (const a of (ev.apps || [])) {
+    if (a.status === "paid" && !a.paidOn) {
+      const d = daysOfApp(a.id)[0];
+      a.paidOn = legacy ? (d ? d.date : isoOf(new Date(a.created || Date.now()))) : todayISO();
+      touched = true;
+    } else if (a.status !== "paid" && a.paidOn) { delete a.paidOn; touched = true; }
+  }
+  return touched;
+}
+async function migrateEvents() {
+  let touched = stampPaid(true);
   for (const ev of S.events) {
     if (!Array.isArray(ev.apps)) {
       const a = blankApp();
@@ -1019,7 +1039,7 @@ function refreshLists() { renderItems(); renderStock(); renderGrid(); renderSess
 function renderAll() {
   renderNav(); setTab(S.tab);
   renderSession(); renderGrid(); renderTicket();
-  renderItems(); renderStock(); renderEvents(); renderReports(); renderData();
+  renderItems(); renderStock(); renderGear(); renderEvents(); renderReports(); renderData();
 }
 
 /* ---------------------------- tabs ---------------------------- */
@@ -1046,6 +1066,7 @@ function setTab(id) {
   if (id === "events") renderEvents();
   if (id === "items") renderItems();
   if (id === "stock") renderStock();
+  if (id === "gear") renderGear();
   panelOf(id).scrollTop = 0;
 }
 
@@ -3175,7 +3196,8 @@ function movementList(stockId, unit, only, canDelete) {
    -------------------------------------------------------------------------- */
 const TRASH_CAP = 40;
 const TRASH_KIND = {
-  material: "Material", product: "Thing you make", event: "Market", batch: "Batch", category: "Type"
+  material: "Material", product: "Thing you make", event: "Market", batch: "Batch", category: "Type",
+  asset: "Equipment", assetType: "Type of equipment", cash: "Money in or out"
 };
 function agoWords(ts) {
   const mins = Math.round((Date.now() - ts) / 60000);
@@ -3258,6 +3280,17 @@ async function restoreTrash(id) {
   } else if (t.kind === "batch") {
     if (!S.lots.some(x => x.id === p.lot.id)) S.lots.push(p.lot);
     await saveLots();
+  } else if (t.kind === "asset") {
+    if (!S.assets.some(a => a.id === p.asset.id)) S.assets.push(p.asset);
+    if (p.asset.type && !assetTypes().includes(p.asset.type)) {
+      S.settings.assetTypes = assetTypes().concat([p.asset.type]).sort(); await saveSettings();
+    }
+    await saveAssets();
+  } else if (t.kind === "cash") {
+    if (!S.cash.some(c => c.id === p.entry.id)) S.cash.push(p.entry);
+    await saveCash();
+  } else if (t.kind === "assetType") {
+    if (!assetTypes().includes(p.name)) { S.settings.assetTypes = assetTypes().concat([p.name]).sort(); await saveSettings(); }
   } else if (t.kind === "category") {
     if (!S.categories.includes(p.name)) { S.categories = S.categories.concat([p.name]).sort(); }
     await saveCategories();
@@ -4284,7 +4317,8 @@ const last30 = () => addDays(todayISO(), -29);
 const RF = { ev: "", type: "", from: last30(), to: todayISO(), pop: "name", popAll: false, report: "takings" };
 const REPORTS = [
   ["takings", "Takings"],
-  ["written", "Written off"]
+  ["written", "Written off"],
+  ["cash", "Cash flow"]
 ];
 const RANGES = [
   ["30", "Last 30 days", () => [addDays(todayISO(), -29), todayISO()]],
@@ -4357,6 +4391,7 @@ function reportFilters() {
 function renderReportBody() {
   const host = $("#repBody");
   if (!host) return;
+  if (RF.report === "cash") { host.innerHTML = reportCash(); bindCash(host); return; }
   host.innerHTML = RF.report === "written" ? reportWritten() : reportTakings();
   host.querySelectorAll("[data-wgrp]").forEach(b => b.onclick = () => {
     const x = WO_GROUPS[+b.dataset.wgrp];
@@ -4857,7 +4892,7 @@ function backupJson(slot) {
     v: 7, exported: Date.now(), slot: slot || null,
     items: S.items, materials: S.materials, categories: S.categories,
     productTypes: S.productTypes, trash: S.trash,
-    orders: S.orders,
+    orders: S.orders, assets: S.assets, cash: S.cash,
     events: S.events, days: S.days,
     settings, sales: S.sales,
     lots: S.lots, writeoffs: S.writeoffs, reversals: S.reversals
@@ -4960,6 +4995,8 @@ function renderData() {
           <button class="btn sec sm auto" id="expCsv">Sales</button>
           <button class="btn sec sm auto" id="expStockCsv">Inventory</button>
           <button class="btn sec sm auto" id="expEvCsv">Events</button>
+          <button class="btn sec sm auto" id="expGearCsv">Equipment</button>
+          <button class="btn sec sm auto" id="expCashCsv">Cash flow</button>
         </div>
       </div>
 
@@ -4976,7 +5013,7 @@ function renderData() {
 
       <div class="card" style="border-radius:28px;background:var(--warn-tint);box-shadow:none">
         <p class="note" style="color:var(--warn-ink);margin-bottom:14px"><b>Warning: this wipes all data on this iPad</b> —
-          ${S.items.length} things · ${S.materials.length} materials · ${S.events.length} events · ${S.sales.length} sales,
+          ${S.items.length} things · ${S.materials.length} materials · ${S.assets.length} pieces of equipment · ${S.events.length} events · ${S.sales.length} sales,
           and Recently deleted too. It cannot be undone. Save a backup first.</p>
         <button class="btn danger sm auto" id="wipe" style="background:var(--card)">Clear everything</button>
       </div>
@@ -5009,6 +5046,8 @@ function renderData() {
       S.productTypes = d.productTypes || [...new Set((d.items || []).map(i => i.type).filter(Boolean))].sort();
       S.trash = d.trash || [];
       S.orders = d.orders || [];
+      S.assets = d.assets || [];
+      S.cash = d.cash || [];
       S.sales = d.sales || [];
       S.lots = d.lots || [];
       S.writeoffs = d.writeoffs || [];
@@ -5029,7 +5068,7 @@ function renderData() {
       await migrateEvents();
       await saveItems(); await saveMaterials(); await saveCategories(); await saveProductTypes(); await saveEvents();
       await saveDays(); await saveSettings();
-      await saveLots(); await saveWriteoffs(); await saveReversals(); await saveTrash(); await saveOrders();
+      await saveLots(); await saveWriteoffs(); await saveReversals(); await saveTrash(); await saveOrders(); await saveAssets(); await saveCash();
       setCart([]); renderAll(); toast("Backup loaded");
     } catch (err) {
       alert("That file isn't a Stallbook backup. Look for one called stallbook-backup-<date>.json");
@@ -5040,7 +5079,7 @@ function renderData() {
   $("#wipe").onclick = async () => {
     confirmAsk({
       title: "Are you sure?",
-      body: "This wipes <b>all data</b> on this iPad — every thing you make, every material, every market and every sale. Recently deleted is cleared too.",
+      body: "This wipes <b>all data</b> on this iPad — every thing you make, every material, every piece of equipment, every market, every sale and every record of money in or out. Recently deleted is cleared too.",
       yes: "Yes, I'm sure", no: "Cancel",
       onYes: () => confirmAsk({
         title: "Last warning",
@@ -5049,12 +5088,12 @@ function renderData() {
         onYes: async () => {
           for (const s of S.sales) await saleDel(s.id);
           S.items = []; S.materials = []; S.categories = []; S.productTypes = []; S.events = []; S.days = [];
-          S.sales = []; setCart([]); S.lots = []; S.writeoffs = []; S.reversals = []; S.trash = []; S.orders = [];
+          S.sales = []; setCart([]); S.lots = []; S.writeoffs = []; S.reversals = []; S.trash = []; S.orders = []; S.assets = []; S.cash = [];
           S.tickets = []; S.activeTicket = null; await saveTickets();
           S.settings.activeDay = null;
           await saveItems(); await saveMaterials(); await saveCategories(); await saveProductTypes(); await saveEvents();
           await saveDays(); await saveSettings();
-          await saveLots(); await saveWriteoffs(); await saveReversals(); await saveTrash(); await saveOrders();
+          await saveLots(); await saveWriteoffs(); await saveReversals(); await saveTrash(); await saveOrders(); await saveAssets(); await saveCash();
           renderAll();
         }
       })
@@ -5103,6 +5142,27 @@ function bindExports() {
     saveOut("stallbook-events-" + todayISO() + ".csv", rows.join("\n"), "text/csv");
   };
 
+  $("#expCashCsv").onclick = () => {
+    const q = v => '"' + String(v == null ? "" : v).replace(/"/g, '""') + '"';
+    const rows = [["date", "kind", "description", "who", "money_in", "money_out", "balance"].join(",")];
+    let bal = 0;
+    for (const m of cashMoves()) {
+      bal += m.amount;
+      rows.push([m.date, CASH_GROUP[m.group][0], m.label, m.who || "", m.amount > 0 ? m4(m.amount) : "",
+        m.amount < 0 ? m4(-m.amount) : "", m4(bal)].map(q).join(","));
+    }
+    saveOut("stallbook-cashflow-" + todayISO() + ".csv", rows.join("\n"), "text/csv");
+  };
+
+  $("#expGearCsv").onclick = () => {
+    const q = v => '"' + String(v == null ? "" : v).replace(/"/g, '""') + '"';
+    const rows = [["name", "type", "quantity", "cost_each", "total_cost", "bought_on", "bought_from", "condition", "still_using", "note"].join(",")];
+    for (const a of S.assets.slice().sort((x, y) => (x.type || "").localeCompare(y.type || "") || x.name.localeCompare(y.name)))
+      rows.push([a.name, a.type, a.qty, a.cost, assetTotal(a), a.bought, a.from, condLabel(a.condition),
+        a.retired ? "no" : "yes", a.note].map(q).join(","));
+    saveOut("stallbook-equipment-" + todayISO() + ".csv", rows.join("\n"), "text/csv");
+  };
+
   $("#expStockCsv").onclick = () => {
     const q = v => '"' + String(v == null ? "" : v).replace(/"/g, '""') + '"';
     const nameOf = id => {
@@ -5136,6 +5196,510 @@ function bindExports() {
         l.disposition === "waste" ? "loss" : "back to stock", l.reason, l.cost].map(q).join(","));
     }
     saveOut("stallbook-stock-" + todayISO() + ".csv", rows.join("\n"), "text/csv");
+  };
+}
+
+/* ---------------------------- cash flow ----------------------------
+   Money coming into and going out of the business, by date. Most of it the
+   app already knows — takings, materials bought, equipment, stall fees and
+   travel. What it can't see is the owners: the cash you started with, money
+   you put in later, what you pay yourselves, and the odd expense that isn't
+   stock or kit (insurance, a permit). Those are entered here.
+
+   Pre-made batches aren't counted: what they cost came from materials that
+   were already counted when they were bought.
+   ------------------------------------------------------------------ */
+const CASH_KINDS = {
+  start: { label: "Starting cash", sign: 1, group: "owner_in" },
+  in: { label: "Money put in", sign: 1, group: "owner_in" },
+  out: { label: "Paid to owner", sign: -1, group: "owner_out" },
+  expense: { label: "Other expense", sign: -1, group: "expense" }
+};
+/* [name, shown in / out] — the order lines appear in the statement */
+const CASH_GROUP = {
+  owner_in: ["Money put in", 1], sales: ["Takings", 1], stock: ["Stock bought", -1],
+  gear: ["Equipment", -1], stall: ["Stall fees and travel", -1], expense: ["Other expenses", -1],
+  owner_out: ["Paid to owners", -1]
+};
+const cashWho = () => [...new Set(S.cash.map(c => (c.who || "").trim()).filter(Boolean))].sort();
+
+function cashMoves() {
+  const out = [];
+  for (const c of S.cash) {
+    const k = CASH_KINDS[c.kind] || CASH_KINDS.in;
+    out.push({ date: c.date, amount: k.sign * (+c.amount || 0), group: k.group, who: c.who || "",
+      label: c.note ? k.label + " · " + c.note : k.label, entry: c.id, kind: c.kind });
+  }
+  const byDay = {};
+  for (const s of S.sales) {
+    const c = ctxOf(s.dayId);
+    const date = c.date || isoOf(new Date(s.ts));
+    const k = (s.dayId || "") + "|" + date;
+    byDay[k] = byDay[k] || { date, amount: 0, event: c.event };
+    byDay[k].amount += +s.total || 0;
+  }
+  for (const d of Object.values(byDay)) if (d.amount)
+    out.push({ date: d.date, amount: d.amount, group: "sales", label: "Takings · " + d.event });
+  for (const l of S.lots) {
+    const m = matById(lotRef(l));
+    const cost = (+l.qty || 0) * (+l.unitCost || 0);
+    if (!m || !cost) continue;
+    out.push({ date: l.date || isoOf(new Date(l.created || Date.now())), amount: -cost, group: "stock",
+      label: "Bought " + (Math.round(l.qty * 100) / 100) + " " + (m.unit || "each") + " " + m.name });
+  }
+  for (const a of S.assets) {
+    const cost = assetTotal(a);
+    if (!cost) continue;
+    out.push({ date: a.bought || isoOf(new Date(a.created || Date.now())), amount: -cost, group: "gear",
+      label: "Equipment · " + a.name + ((+a.qty || 1) > 1 ? " × " + a.qty : "") });
+  }
+  for (const ev of S.events) for (const a of (ev.apps || [])) {
+    const name = ev.name || "Untitled event";
+    if (a.status === "paid" && (+a.fee || 0)) out.push({ date: a.paidOn || todayISO(), amount: -(+a.fee), group: "stall", label: "Stall fee · " + name });
+    const first = daysOfApp(a.id)[0];
+    if (first && appStarted(a) && (+ev.travel || 0)) out.push({ date: first.date, amount: -(+ev.travel), group: "stall", label: "Travel · " + name });
+  }
+  return out.sort((x, y) => (x.date || "").localeCompare(y.date || "") || y.amount - x.amount);
+}
+/* what the business has right now — nothing dated in the future */
+const cashNow = () => cashMoves().filter(m => m.date <= todayISO()).reduce((a, m) => a + m.amount, 0);
+
+function reportCash() {
+  const moves = cashMoves();
+  const now = moves.filter(m => m.date <= todayISO()).reduce((a, m) => a + m.amount, 0);
+  const before = moves.filter(m => RF.from && m.date < RF.from).reduce((a, m) => a + m.amount, 0);
+  const inR = moves.filter(m => inRange(m.date));
+  const close = before + inR.reduce((a, m) => a + m.amount, 0);
+  const sum = g => inR.filter(m => m.group === g).reduce((a, m) => a + m.amount, 0);
+  const trading = ["sales", "stock", "gear", "stall", "expense"].reduce((a, g) => a + sum(g), 0);
+  const paid = -sum("owner_out"), putIn = sum("owner_in");
+  const hasStart = S.cash.some(c => c.kind === "start");
+
+  const buttons = `<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:18px">
+      <button class="btn sm auto" id="cashOut">Pay ourselves</button>
+      <button class="btn sec sm auto" id="cashIn">${hasStart ? "Put money in" : "Set starting cash"}</button>
+      <button class="btn sec sm auto" id="cashExp">Other expense</button>
+    </div>`;
+  if (!moves.length) return buttons + `<p class="note">Nothing to show yet. Start with the cash the business began with, then takings, stock, equipment and stall fees fill themselves in from the rest of the app.</p>`;
+
+  const rows = Object.entries(CASH_GROUP).map(([g, [name]]) => [name, sum(g)]).filter(([, v]) => Math.abs(v) >= 0.005);
+  const line = (label, v, strong) => `<div class="inset"${strong ? ' style="background:var(--green-tint)"' : ""}>
+      <span class="b"><span class="n"${strong ? ' style="color:var(--green-deep)"' : ' style="font-weight:600;font-family:var(--body);font-size:16px"'}>${esc(label)}</span></span>
+      <span class="r" style="${v < 0 ? "color:var(--warn-ink)" : ""}${strong ? ";font-size:20px" : ""}">${v < 0 ? "−" : (strong ? "" : "+")}${esc(cur(Math.abs(v)))}</span></div>`;
+
+  const who = cashWho();
+  const people = who.map(w => {
+    const mine = inR.filter(m => m.who === w);
+    return [w, mine.filter(m => m.group === "owner_in").reduce((a, m) => a + m.amount, 0),
+      -mine.filter(m => m.group === "owner_out").reduce((a, m) => a + m.amount, 0)];
+  }).filter(([, i, o]) => i || o);
+
+  /* newest first, each with the balance after it */
+  let run = before;
+  const ledger = inR.map(m => { run += m.amount; return { ...m, bal: run }; }).reverse();
+  const shown = S.cashAll ? ledger : ledger.slice(0, 25);
+
+  return buttons + `
+    <div class="kpis">
+      <div class="kpi tint big"><div class="k">In the business now</div><div class="v">${now < 0 ? "−" : ""}${esc(cur(Math.abs(now)))}</div>
+        <div class="n">${hasStart ? "everything up to today" : "no starting cash set yet"}</div></div>
+      <div class="kpi"><div class="k">Paid to owners</div><div class="v">${esc(cur(paid))}</div><div class="n">in these dates</div></div>
+      <div class="kpi"><div class="k">Money put in</div><div class="v">${esc(cur(putIn))}</div><div class="n">in these dates</div></div>
+      <div class="kpi ${trading < 0 ? "warn" : ""}"><div class="k">From trading</div><div class="v">${trading < 0 ? "−" : ""}${esc(cur(Math.abs(trading)))}</div>
+        <div class="n">takings less everything spent</div></div>
+    </div>
+    ${now < 0 ? `<p class="note" style="color:var(--warn-ink)">More has gone out than the app knows came in. Usually that means the starting cash, or money you put in, hasn't been entered yet.</p>` : ""}
+
+    <div class="sect">Where the money went</div>
+    <div class="card">
+      ${RF.from ? line("At the start, " + fmtDate(RF.from, true), before) : ""}
+      ${rows.map(([n, v]) => line(n, v)).join("")}
+      ${line(RF.to && RF.to < todayISO() ? "At the end, " + fmtDate(RF.to, true) : "Left in the business", close, true)}
+    </div>
+
+    ${people.length ? `<div class="sect">Each of you</div>
+      <div class="card">${people.map(([w, i, o]) => `<div class="inset">
+        <span class="b"><span class="n">${esc(w)}</span>
+          <span class="s">put in ${esc(cur(i))} · paid ${esc(cur(o))}</span></span>
+        <span class="r">${Math.abs(o - i) < 0.005 ? "even" : esc(cur(Math.abs(o - i))) + (o > i ? " net out" : " net in")}</span></div>`).join("")}</div>` : ""}
+
+    <div class="sect">Every movement</div>
+    ${ledger.length ? `<div class="card">${shown.map(m => `<${m.entry ? `button data-cashed="${m.entry}"` : "div"} class="inset">
+        <span class="fact ${m.amount < 0 ? "warn" : "good"}" style="min-width:92px;text-align:center">${m.amount < 0 ? "−" : "+"}${esc(cur(Math.abs(m.amount)))}</span>
+        <span class="b"><span class="n" style="font-size:16px">${esc(m.label)}</span>
+          <span class="s">${esc(fmtDate(m.date, true))}${m.who ? " · " + esc(m.who) : ""}${m.date > todayISO() ? " · not yet" : ""}</span></span>
+        <span class="r" style="font-size:15px;color:var(--ink-mute)">${m.bal < 0 ? "−" : ""}${esc(cur(Math.abs(m.bal)))}</span>
+      </${m.entry ? "button" : "div"}>`).join("")}</div>
+      ${ledger.length > 25 ? `<button class="btn ghost" id="cashAll">${S.cashAll ? "Just the latest 25" : "Show all " + ledger.length}</button>` : ""}
+      <p class="note" style="margin-top:12px">The right-hand figure is what was left after each one. Tap anything you entered yourself to change it. Takings count cash and card alike.</p>`
+      : '<p class="note">Nothing in these dates.</p>'}`;
+}
+
+function bindCash(host) {
+  $("#cashOut").onclick = () => cashSheet(null, "out");
+  $("#cashIn").onclick = () => cashSheet(null, S.cash.some(c => c.kind === "start") ? "in" : "start");
+  $("#cashExp").onclick = () => cashSheet(null, "expense");
+  if ($("#cashAll")) $("#cashAll").onclick = () => { S.cashAll = !S.cashAll; renderReportBody(); };
+  host.querySelectorAll("[data-cashed]").forEach(b => b.onclick = () => cashSheet(S.cash.find(c => c.id === b.dataset.cashed)));
+}
+
+function cashSheet(existing, kind) {
+  const c = existing ? JSON.parse(JSON.stringify(existing))
+    : { id: uid(), kind, date: todayISO(), amount: "", who: S.settings.lastWho || "", note: "", created: Date.now() };
+  const owner = () => c.kind !== "expense";
+  const heads = { start: "Starting cash", in: "Put money in", out: "Pay ourselves", expense: "Other expense" };
+  const others = S.cash.filter(x => x.id !== c.id);
+  const balNow = cashNow() - (existing && existing.date <= todayISO() ? (CASH_KINDS[existing.kind].sign * (+existing.amount || 0)) : 0);
+
+  sheet(heads[c.kind], '<div id="cashBody"></div>', [
+    { label: existing ? "Save" : "Record it", cls: "btn", id: "cashSave" },
+    existing ? { label: "Delete", cls: "btn sec", id: "cashDel" } : null
+  ].filter(Boolean), { narrow: true });
+
+  const read = () => {
+    c.amount = $("#cAmt").value === "" ? "" : Math.max(0, +$("#cAmt").value || 0);
+    c.date = $("#cDate").value || todayISO();
+    if ($("#cWho")) c.who = $("#cWho").value.trim();
+    c.note = $("#cNote").value.trim();
+  };
+
+  const draw = () => {
+    const tone = c.kind === "out" || c.kind === "expense";
+    $("#cashBody").innerHTML = `
+      ${c.kind === "start" || c.kind === "in" ? `<div class="togs even" style="margin-bottom:14px">
+        <button class="tog sm" data-ck="start" aria-pressed="${c.kind === "start"}">Starting cash</button>
+        <button class="tog sm" data-ck="in" aria-pressed="${c.kind === "in"}">Adding more</button>
+      </div>
+      <p class="note">${c.kind === "start"
+        ? "What the business had on day one — the float, and anything already in its account."
+        : "Money you've put in from your own pocket since — to buy stock, cover a fee, or top up the float."}
+        ${c.kind === "start" && others.some(x => x.kind === "start") ? " <b>There's already a starting figure</b> — this one adds to it." : ""}</p>` : ""}
+      ${c.kind === "out" ? `<p class="note">Profit you're taking out for yourselves. It isn't a cost of the business — it doesn't change what anything made — it just leaves the kitty.</p>` : ""}
+      ${c.kind === "expense" ? `<p class="note">Something the business paid for that isn't stock, equipment or a stall fee — insurance, a permit, card-reader fees.</p>` : ""}
+      ${tone ? `<div class="kpi tint" style="margin-bottom:14px"><div class="k">In the business right now</div>
+        <div class="v sm">${balNow < 0 ? "−" : ""}${esc(cur(Math.abs(balNow)))}</div></div>` : ""}
+      <div class="rowf">
+        <label class="f"><span class="t">How much</span>
+          <input type="number" id="cAmt" inputmode="decimal" step="0.01" min="0" value="${esc(c.amount)}" placeholder="200.00"></label>
+        <label class="f"><span class="t">When</span><input type="date" id="cDate" value="${esc(c.date)}"></label>
+      </div>
+      ${owner() ? `<label class="f"><span class="t">${c.kind === "out" ? "Paid to" : "From"}</span>
+        <input type="text" id="cWho" list="cWhoList" value="${esc(c.who)}" placeholder="Naomi" autocomplete="off">
+        <datalist id="cWhoList">${cashWho().map(w => `<option value="${esc(w)}"></option>`).join("")}</datalist></label>` : ""}
+      <label class="f" style="margin-bottom:0"><span class="t">Note</span>
+        <input type="text" id="cNote" value="${esc(c.note)}" placeholder="${c.kind === "expense" ? "Public liability insurance" : (c.kind === "out" ? "Spring markets" : "Float for the till")}"></label>`;
+    document.querySelectorAll("[data-ck]").forEach(b => b.onclick = () => { read(); c.kind = b.dataset.ck; draw(); });
+  };
+  draw();
+
+  $("#cashSave").onclick = async () => {
+    read();
+    if (!(+c.amount > 0)) { alert("How much?"); return; }
+    const go = async () => {
+      if (owner() && c.who) S.settings.lastWho = c.who;
+      const i = S.cash.findIndex(x => x.id === c.id);
+      if (i >= 0) S.cash[i] = c; else S.cash.push(c);
+      await saveCash(); await saveSettings();
+      closeSheet(); renderReports(); renderData();
+      toast(existing ? "Saved" : (c.kind === "out" ? cur(c.amount) + " paid" + (c.who ? " to " + c.who : " out")
+        : c.kind === "expense" ? cur(c.amount) + " expense recorded" : cur(c.amount) + " put in"));
+    };
+    if (c.kind === "out" && c.date <= todayISO() && +c.amount > balNow + 0.005)
+      confirmAsk({
+        title: "More than the business has",
+        body: `The app only knows of ${esc(cur(Math.max(0, balNow)))} in the business. If that's wrong, the starting cash or something you put in is probably missing. Record it anyway?`,
+        yes: "Record it", no: "Go back", danger: false, onYes: go
+      });
+    else go();
+  };
+
+  if ($("#cashDel")) $("#cashDel").onclick = () => confirmAsk({
+    title: "Delete this?",
+    body: `${esc(CASH_KINDS[existing.kind].label)} of ${esc(cur(+existing.amount || 0))} on ${esc(fmtDate(existing.date, true))}. You can put it back from <b>Safe → Recently deleted</b>.`,
+    onYes: async () => {
+      await trashPut("cash", CASH_KINDS[existing.kind].label + " " + cur(+existing.amount || 0),
+        fmtDate(existing.date, true) + (existing.who ? " · " + existing.who : ""), { entry: existing });
+      S.cash = S.cash.filter(x => x.id !== existing.id);
+      await saveCash();
+      closeSheet(); renderReports(); renderData();
+      toast("Deleted", "Undo", () => restoreTrash(S.trash[0].id));
+    }
+  });
+}
+
+/* ---------------------------- equipment ----------------------------
+   The things the stall is built from — table, cloth, stands, signs, the
+   gazebo. Bought once, used every market, never sold. Kept apart from
+   Inventory on purpose: nothing here has batches, FIFO cost or write-offs,
+   and none of it touches the cost of what you sell.
+   ------------------------------------------------------------------ */
+const ASSET_TYPES_START = ["Coverings", "Displays", "Furniture", "Shelter", "Signage", "Tech and payments"];
+const assetTypes = () => S.settings.assetTypes || ASSET_TYPES_START.slice();
+const CONDITIONS = [["good", "Good"], ["worn", "Showing wear"], ["fix", "Needs fixing"]];
+const condLabel = k => (CONDITIONS.find(c => c[0] === k) || CONDITIONS[0])[1];
+const assetTotal = a => Math.round((+a.qty || 0) * (+a.cost || 0) * 100) / 100;
+const assetById = id => S.assets.find(a => a.id === id) || null;
+
+function assetCard(a) {
+  const qty = +a.qty || 1;
+  const chips = [];
+  if (a.condition === "fix") chips.push('<span class="chip">Needs fixing</span>');
+  if (a.condition === "worn") chips.push('<span class="chip neutral">Showing wear</span>');
+  const bits = [a.bought ? "bought " + fmtDate(a.bought, true) : "", a.from || ""].filter(Boolean).join("<br>");
+  return `<button class="pcard ${a.retired ? "off" : ""}" data-asset="${a.id}">
+    ${thumb(a, "sw", true)}
+    <span class="nm">${esc(a.name)}</span>
+    ${qty > 1 ? `<span class="big">${qty} of them</span>` : ""}
+    ${bits ? `<span class="s">${bits.split("<br>").map(esc).join("<br>")}</span>` : ""}
+    ${chips.length ? `<span class="chips">${chips.join("")}</span>` : ""}
+    <span class="pill">${(+a.cost || 0) ? esc(cur(assetTotal(a))) : "no cost"}</span>
+  </button>`;
+}
+
+function renderGear() {
+  const p = $("#pGear");
+  if (!p) return;
+  const q = S.gearQ || "";
+  const match = a => hits(q, a.name, a.type, a.from, a.note);
+  const live = S.assets.filter(a => !a.retired);
+  const retired = S.assets.filter(a => a.retired && match(a)).sort((a, b) => a.name.localeCompare(b.name));
+  const spent = live.reduce((x, a) => x + assetTotal(a), 0);
+  const pieces = live.reduce((x, a) => x + (+a.qty || 1), 0);
+  const fix = live.filter(a => a.condition === "fix");
+
+  const byType = {};
+  for (const t of assetTypes()) byType[t] = [];
+  for (const a of live) (byType[a.type || "Other"] ||= []).push(a);
+  const groups = Object.entries(byType)
+    .map(([t, as]) => [t, as.filter(match)])
+    .filter(([, as]) => as.length)
+    .sort((a, b) => a[0].localeCompare(b[0]));
+  const found = groups.reduce((x, [, as]) => x + as.length, 0);
+
+  p.innerHTML = `
+    <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:18px">
+      ${searchBox("gearSearch", q, "Search equipment")}
+      <span style="flex:1"></span>
+      <button class="btn sec sm auto" id="gearTypes">Types</button>
+      <button class="btn sm auto" id="addGear">+ Add equipment</button>
+    </div>
+    ${S.assets.length ? `<div class="kpis">
+      <div class="kpi"><div class="k">Pieces in use</div><div class="v">${pieces}</div>
+        <div class="n">${live.length} ${live.length === 1 ? "entry" : "entries"}${S.assets.some(a => a.retired) ? " · " + S.assets.filter(a => a.retired).length + " retired" : ""}</div></div>
+      <div class="kpi"><div class="k">Spent on it</div><div class="v">${esc(cur(spent))}</div>
+        <div class="n">what the kit in use cost you</div></div>
+      <div class="kpi ${fix.length ? "warn" : ""}"><div class="k">Needs fixing</div>
+        <div class="v">${fix.length || "None"}</div>
+        <div class="n">${fix.length ? esc(fix.map(a => a.name).slice(0, 2).join(", ")) + (fix.length > 2 ? " and more" : "") : "all in working order"}</div></div>
+    </div>` : `<p class="note">Equipment is what the stall is built from — the table, the cloth, display stands, signs, the gazebo. It's never sold, so it lives here rather than in Inventory and doesn't touch the cost of anything you make.</p>`}
+    ${q && !found && !retired.length ? `<p class="note">Nothing matches "${esc(q)}".</p>` : ""}
+    ${groups.map(([t, as]) => `
+      <div class="typehead">
+        <span class="sect" style="margin:0">${esc(t)}</span>
+      </div>
+      ${as.length ? `<div class="pgrid">${as.sort((a, b) => a.name.localeCompare(b.name)).map(assetCard).join("")}</div>`
+        : `<p class="note">${q ? "Nothing here matches." : "Nothing under this type yet."}</p>`}`).join("")}
+    ${retired.length ? `
+      <button class="typehead" id="toggleRetired" style="width:100%;margin-top:26px">
+        <span class="sect" style="margin:0;color:var(--ink-mute)">Retired · ${retired.length}</span>
+        <span class="tlink">${S.showRetired ? "Hide" : "Show"}</span>
+      </button>
+      ${S.showRetired ? `<div class="pgrid">${retired.map(assetCard).join("")}</div>` : ""}` : ""}`;
+
+  const sb = $("#gearSearch");
+  if (sb) {
+    sb.oninput = () => { S.gearQ = sb.value; renderGear(); };
+    if (q) { sb.focus(); sb.setSelectionRange(q.length, q.length); }
+  }
+  $("#addGear").onclick = () => assetSheet(null);
+  $("#gearTypes").onclick = () => assetTypeSheet();
+  if ($("#toggleRetired")) $("#toggleRetired").onclick = () => { S.showRetired = !S.showRetired; renderGear(); };
+  p.querySelectorAll("[data-asset]").forEach(b => b.onclick = () => assetSheet(assetById(b.dataset.asset)));
+}
+
+function deleteAssetType(t, after) {
+  confirmAsk({
+    title: "Delete " + t + "?",
+    body: "Nothing is filed under it. You can put it back from <b>Safe → Recently deleted</b>.",
+    onYes: async () => {
+      await trashPut("assetType", t, "type of equipment", { name: t });
+      S.settings.assetTypes = assetTypes().filter(x => x !== t);
+      await saveSettings();
+      after(); renderGear(); renderData();
+      toast(t + " deleted", "Undo", () => restoreTrash(S.trash[0].id));
+    }
+  });
+}
+
+function assetTypeSheet() {
+  const draw = () => {
+    sheet("Types of equipment", `
+      <p class="note">Only for grouping the Equipment screen. Rename freely — nothing else depends on them.</p>
+      <div class="card">${assetTypes().slice().sort().map(t => {
+        const n = S.assets.filter(a => a.type === t).length;
+        return `<div class="inset">
+          <span class="b"><span class="n">${esc(t)}</span><span class="s">${n} piece${n === 1 ? "" : "s"}</span></span>
+          ${n ? "" : `<button class="xbtn" data-gtx="${esc(t)}" aria-label="Delete ${esc(t)}">✕</button>`}
+        </div>`;
+      }).join("") || '<p class="note" style="margin:0">No types yet.</p>'}</div>
+      <label class="f" style="margin-top:14px"><span class="t">Add a type</span>
+        <div style="display:flex;gap:10px">
+          <input type="text" id="newGt" placeholder="Lighting" style="flex:1">
+          <button class="btn sec sm auto" id="addGt">Add</button>
+        </div></label>`, null, { narrow: true });
+    $("#addGt").onclick = async () => {
+      const v = $("#newGt").value.trim();
+      if (!v) return;
+      if (assetTypes().includes(v)) { toast("Already there"); return; }
+      S.settings.assetTypes = assetTypes().concat([v]).sort();
+      await saveSettings(); draw(); renderGear();
+      toast(v + " added");
+    };
+    document.querySelectorAll("[data-gtx]").forEach(b => b.onclick = () => deleteAssetType(b.dataset.gtx, draw));
+  };
+  draw();
+}
+
+function assetSheet(existing) {
+  const a = existing ? JSON.parse(JSON.stringify(existing)) : {
+    id: uid(), name: "", type: assetTypes()[0] || "", qty: 1, cost: "", bought: todayISO(),
+    from: "", condition: "good", retired: false, photo: "", note: "", created: Date.now()
+  };
+  let newType = !assetTypes().length;
+
+  sheet(existing ? esc(a.name || "Equipment") : "New equipment", '<div id="gearBody"></div>', [
+    { label: existing ? "Save" : "Add it", cls: "btn", id: "gearSave" },
+    existing ? { label: "Delete", cls: "btn sec", id: "gearDel" } : null
+  ].filter(Boolean));
+
+  const read = () => {
+    if (!$("#gName")) return;
+    a.name = $("#gName").value;
+    if ($("#gTypeNew")) a.type = $("#gTypeNew").value;
+    else if ($("#gType") && $("#gType").value !== "__new") a.type = $("#gType").value;
+    a.qty = Math.max(1, Math.round(+$("#gQty").value || 1));
+    a.cost = $("#gCost").value === "" ? "" : Math.max(0, +$("#gCost").value || 0);
+    a.bought = $("#gBought").value;
+    a.from = $("#gFrom").value;
+    a.note = $("#gNote").value;
+  };
+
+  const draw = () => {
+    $("#gearBody").innerHTML = `
+      <div class="rowf">
+        <label class="f"><span class="t">Name</span>
+          <input type="text" id="gName" value="${esc(a.name)}" placeholder="6 ft folding table"></label>
+        <label class="f"><span class="t">Type</span><span id="gTypeBox"></span></label>
+      </div>
+      <label class="f"><span class="t">Photo</span>
+        <div class="rowf" style="align-items:center">
+          <span class="av" id="gPrev" style="flex:0 0 64px;min-width:0;${a.photo ? `background-image:url('${a.photo}')` : ""}"></span>
+          <input type="file" id="gFile" accept="image/*" style="flex:1;border:0;padding:0;background:none">
+          <button class="xbtn" id="gClearPhoto" aria-label="Remove photo" style="flex:0 0 44px;min-width:0">✕</button>
+        </div></label>
+      <div class="rowf">
+        <label class="f"><span class="t">How many</span>
+          <input type="number" id="gQty" inputmode="numeric" step="1" min="1" value="${esc(a.qty || 1)}"></label>
+        <label class="f"><span class="t">Cost each</span>
+          <input type="number" id="gCost" inputmode="decimal" step="0.01" min="0" value="${esc(a.cost)}" placeholder="45.00"></label>
+        <label class="f"><span class="t">Bought on</span>
+          <input type="date" id="gBought" value="${esc(a.bought)}"></label>
+      </div>
+      <p class="note" id="gTotal" style="margin:-4px 0 14px"></p>
+      <label class="f"><span class="t">Where from</span>
+        <input type="text" id="gFrom" value="${esc(a.from)}" placeholder="Walmart, Amazon, handmade"></label>
+      <span class="t" style="display:block;font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-mute);margin-bottom:6px">Condition</span>
+      <div class="togs" style="margin-bottom:14px">
+        ${CONDITIONS.map(([k, l]) => `<button class="tog sm" data-cond="${k}" aria-pressed="${a.condition === k}">${l}</button>`).join("")}
+      </div>
+      <label class="f"><span class="t">Note</span>
+        <textarea id="gNote" placeholder="Leg wobbles — pack the shim">${esc(a.note)}</textarea></label>
+      <span class="t" style="display:block;font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-mute);margin-bottom:6px">Still using it?</span>
+      <div class="togs even" style="max-width:300px">
+        <button class="tog sm" id="gOn" aria-pressed="${!a.retired}">In use</button>
+        <button class="tog sm" id="gOff" aria-pressed="${!!a.retired}">Retired</button>
+      </div>`;
+    bind();
+  };
+
+  const showTotal = () => {
+    const q = Math.max(1, Math.round(+$("#gQty").value || 1)), c = +$("#gCost").value || 0;
+    $("#gTotal").textContent = q > 1 && c ? q + " × " + cur(c) + " = " + cur(q * c) + " altogether" : "";
+  };
+
+  const bind = () => {
+    const drawType = () => {
+      const box = $("#gTypeBox");
+      const types = assetTypes().slice().sort();
+      box.innerHTML = newType
+        ? `<div style="display:flex;gap:8px">
+             <input type="text" id="gTypeNew" value="${esc(a.type)}" placeholder="Displays" style="flex:1">
+             ${types.length ? '<button class="xbtn" id="gTypeBack" aria-label="Pick an existing type">↩</button>' : ""}
+           </div>`
+        : `<select id="gType">
+             ${types.map(t => `<option value="${esc(t)}" ${t === a.type ? "selected" : ""}>${esc(t)}</option>`).join("")}
+             <option value="__new">+ New type…</option>
+           </select>`;
+      if (newType) {
+        $("#gTypeNew").oninput = e => a.type = e.target.value;
+        if ($("#gTypeBack")) $("#gTypeBack").onclick = () => { newType = false; a.type = types[0] || ""; drawType(); };
+      } else {
+        $("#gType").onchange = e => {
+          if (e.target.value === "__new") { newType = true; a.type = ""; drawType(); setTimeout(() => $("#gTypeNew").focus(), 30); }
+          else a.type = e.target.value;
+        };
+      }
+    };
+    drawType();
+    $("#gQty").oninput = showTotal;
+    $("#gCost").oninput = showTotal;
+    showTotal();
+    $("#gClearPhoto").onclick = () => { a.photo = ""; $("#gPrev").style.backgroundImage = ""; };
+    $("#gFile").onchange = async e => {
+      const f = e.target.files[0]; if (!f) return;
+      a.photo = await shrink(f);
+      $("#gPrev").style.backgroundImage = `url('${a.photo}')`;
+    };
+    document.querySelectorAll("[data-cond]").forEach(b => b.onclick = () => { read(); a.condition = b.dataset.cond; draw(); });
+    $("#gOn").onclick = () => { read(); a.retired = false; draw(); };
+    $("#gOff").onclick = () => { read(); a.retired = true; draw(); };
+  };
+
+  draw();
+
+  $("#gearSave").onclick = async () => {
+    read();
+    a.name = (a.name || "").trim();
+    a.type = (a.type || "").trim();
+    a.from = (a.from || "").trim();
+    a.note = (a.note || "").trim();
+    if (!a.name) { alert("Give it a name."); return; }
+    if (!a.type) a.type = "Other";
+    if (!assetTypes().includes(a.type)) {
+      S.settings.assetTypes = assetTypes().concat([a.type]).sort();
+      await saveSettings();
+    } else if (!S.settings.assetTypes) {
+      S.settings.assetTypes = assetTypes(); await saveSettings();
+    }
+    const i = S.assets.findIndex(x => x.id === a.id);
+    if (i >= 0) S.assets[i] = a; else S.assets.push(a);
+    await saveAssets();
+    closeSheet(); renderGear();
+    toast(existing ? a.name + " saved" : a.name + " added");
+  };
+
+  if ($("#gearDel")) $("#gearDel").onclick = () => {
+    confirmAsk({
+      title: "Delete " + (a.name || "this") + "?",
+      body: "If you've stopped using it, <b>Retired</b> keeps the record instead. Deleting can be undone from <b>Safe → Recently deleted</b>.",
+      onYes: async () => {
+        await trashPut("asset", existing.name || "Equipment", (existing.type || "") + ((+existing.cost || 0) ? " · " + cur(assetTotal(existing)) : ""), { asset: existing });
+        S.assets = S.assets.filter(x => x.id !== existing.id);
+        await saveAssets();
+        closeSheet(); renderGear(); renderData();
+        toast((existing.name || "Equipment") + " deleted", "Undo", () => restoreTrash(S.trash[0].id));
+      }
+    });
   };
 }
 

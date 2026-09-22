@@ -1,7 +1,7 @@
 /* Stallbook offline cache. Bump CACHE when you edit index.html or app.js.
    Google Fonts are cached at runtime by the fetch handler below — the stall
    needs one online visit before the app is fully offline-ready. */
-const CACHE = "stallbook-v29";
+const CACHE = "stallbook-v31";
 const ASSETS = ["./", "./index.html", "./app.js", "./manifest.json", "./icon-192.png", "./icon-512.png"];
 
 self.addEventListener("install", e => {
