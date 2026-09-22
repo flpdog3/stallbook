@@ -156,6 +156,35 @@ The original sale stands — you keep that money, and the replacement draws its 
 from stock at its own FIFO cost. Don't also write off the returned one: it was already
 sold and costed, and writing it off would count the same loss twice.
 
+### How they paid
+
+Under the total on every ticket is **Paid by** — Cash, Card or Venmo to start. Pick one
+before **Complete order**. If that way of paying takes a cut, the ticket says so right
+there: "Venmo keeps $0.31 · You get $10.69". Each new ticket starts back on the first one
+(Cash), so a Venmo sale doesn't carry over to the next customer by accident.
+
+**Fees** next to it sets what each one keeps — a percent plus a fixed amount per sale.
+Venmo's goods-and-services rate is set to 1.9% + $0.10; put your card reader's rate in
+if it charges one. You can rename them, add more (Cash App, Zelle), or remove one. Each has an
+**On the ticket / Switched off** toggle: switch Card off until you have a reader and it
+disappears from the ticket, keeping its fee and history, then switch it back on when you
+need it. The first one that's switched on is what every ticket starts on. Changing a fee only affects sales from then
+on; past sales keep the rate they were rung up with.
+
+The sale still records what the customer paid — that was the price — and keeps the fee
+alongside it. So:
+
+- **Reports → Takings** shows **Payment fees** as its own figure, taken off **Money kept**,
+  and a **How people paid** card with what came in each way and what actually reached you.
+- **Cash flow** counts takings in full and takes **Payment fees** off as their own line, so
+  **In the business now** matches what really arrived.
+- **Done selling for today** splits the day by how people paid, so the Cash line is what
+  should be in the cash box.
+- Tap a date in **Every market day** and each sale has a **Paid by** picker — for fixing
+  one rung up the wrong way. The fee updates to match.
+
+Sales from before this existed show as **Not recorded**, with no fee.
+
 ## Stock: materials and products
 
 There are two lists, under **Items**: **Products** (what you sell) and **Materials**
@@ -335,8 +364,8 @@ Each entry says who it was from or paid to, so **Each of you** shows what each p
 and took out over the dates chosen. **In the business now** is the running balance up to
 today; **From trading** is takings less everything spent, before anything paid to you.
 **Every movement** lists each one with the balance after it — tap anything you entered to
-change or delete it. Takings count cash and card together, so the balance is what the
-business has in total, not what's in the cash box.
+change or delete it. Takings count every way of paying together, less what Venmo and the like kept, so the
+balance is what the business has in total, not what's in the cash box.
 
 **Safe → Spreadsheets → Cash flow** exports the full list with a running balance.
 
@@ -536,8 +565,7 @@ and your existing data is left alone.
 
 ## Changing the app later
 
-Replace `index.html` on GitHub, **and** open `sw.js` and change `stallbook-v1` to
-`stallbook-v2`. Without that bump the iPad keeps serving the cached old version.
+Replace `index.html` on GitHub, **and** open `sw.js` and bump the number in `stallbook-vNN`. Without that bump the iPad keeps serving the cached old version.
 Then reopen the app twice — once to fetch, once to run the new one.
 
 ## Troubleshooting

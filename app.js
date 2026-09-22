@@ -110,7 +110,6 @@ function itemColor(item, opts) {
    placeholder if not, so every card lines up and adding a photo later just
    fills the gap. Sheet headers only show a real photo. */
 const ICON_PHOTO = '<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="5" width="17" height="14" rx="3.5"></rect><circle cx="9" cy="10" r="1.6"></circle><path d="M5 17l4.5-4.5 3 3 2.5-2.5 4 4"></path></svg>';
-const ICON_CROP = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2.5V16a2 2 0 0 0 2 2h13.5"></path><path d="M2.5 6H16a2 2 0 0 1 2 2v13.5"></path></svg>';
 const thumb = (thing, cls, spot) => thing && thing.photo
   ? `<span class="thumb ${cls || ""}" style="background-image:url('${thing.photo}')"></span>`
   : spot ? `<span class="thumb empty ${cls || ""}" aria-hidden="true">${ICON_PHOTO}</span>` : "";
@@ -291,7 +290,8 @@ function appMoney(ev, a) {
   const taken = sales.reduce((x, s) => x + s.total, 0);
   const goods = sales.reduce((x, s) => x + s.cost, 0);
   const costs = appCosts(ev, a);
-  return { taken, goods, costs, net: taken - goods - costs, sales: sales.length };
+  const payFees = sales.reduce((x, s) => x + saleFee(s), 0);
+  return { taken, goods, costs, payFees, net: taken - goods - costs - payFees, sales: sales.length };
 }
 /* the most recent visit that has sales on it — "how did it go last time?" */
 function lastResult(ev) {
@@ -1097,6 +1097,8 @@ function daySummary(d) {
     sales: sales.length,
     things: lines.reduce((a, l) => a + l.qty, 0),
     taken: sales.reduce((a, x) => a + x.total, 0),
+    fees: sales.reduce((a, x) => a + saleFee(x), 0),
+    pay: payBreakdown(sales),
     free: lines.filter(l => l.mode === "free").reduce((a, l) => a + l.qty, 0)
   };
 }
@@ -1115,6 +1117,9 @@ function finishDaySheet() {
       <div class="kpi big tint"><div class="k">Taken today</div><div class="v">${esc(cur(t.taken))}</div>
         <div class="n">${t.sales} sale${t.sales === 1 ? "" : "s"} · ${t.things} thing${t.things === 1 ? "" : "s"}${t.free ? " · " + t.free + " given away" : ""}</div></div>
     </div>
+    ${t.sales ? `<div class="slabel">How people paid</div>
+      <div class="card">${payRows(t.pay)}</div>
+      ${t.fees >= 0.005 ? `<p class="note">${esc(cur(t.taken - t.fees))} actually reached you after ${esc(cur(t.fees))} in fees.</p>` : ""}` : ""}
     <p class="note">${esc(ev.name || "This market")} on ${esc(fmtDate(d.date, true))}. Closing it just puts
       the till away — nothing is deleted, and you can open it again any time.</p>
     ${cartLeft ? `<p class="note" style="color:var(--warn-ink)"><b>${cartLeft} thing${cartLeft === 1 ? " is" : "s are"} still in the ticket.</b>
@@ -2137,6 +2142,107 @@ const setCart = lines => { ensureTicket().lines = lines; };
 const ticketName = (t, i) => t.label || ("Ticket " + (i + 1));
 const ticketTotal = t => (t.lines || []).reduce((a, l) => a + unitPrice(l) * l.qty, 0);
 const ticketCount = t => (t.lines || []).reduce((a, l) => a + l.qty, 0);
+
+/* ---------------------------- paying ----------------------------
+   How the customer paid decides what actually reaches the business. Cash
+   lands whole; Venmo keeps 1.9% + 10¢. A sale still records what the customer
+   paid — that was the price — and keeps the fee alongside, with the rates
+   used, so Reports and Cash flow can show what really arrived. Changing a
+   fee later only affects sales from then on.
+   ------------------------------------------------------------------ */
+const PAY_START = [
+  { id: "cash", name: "Cash", pct: 0, fixed: 0 },
+  { id: "card", name: "Card", pct: 0, fixed: 0 },
+  { id: "venmo", name: "Venmo", pct: 1.9, fixed: 0.10 }
+];
+const payMethods = () => (S.settings.payMethods && S.settings.payMethods.length)
+  ? S.settings.payMethods : PAY_START.map(p => ({ ...p }));
+const payOf = id => payMethods().find(p => p.id === id) || null;
+/* a way to pay can be switched off (card, before you have a reader) without losing it */
+const activePays = () => { const a = payMethods().filter(p => !p.off); return a.length ? a : payMethods().slice(0, 1); };
+const c2 = n => Math.round(n * 100) / 100;
+function feeFor(rates, total) {
+  if (!rates || !(total > 0)) return 0;
+  const f = total * (+rates.pct || 0) / 100 + (+rates.fixed || 0);
+  return Math.min(total, Math.max(0, c2(f)));
+}
+const saleFee = s => +s.fee || 0;
+const saleNet = s => (+s.total || 0) - saleFee(s);
+const salePayName = s => s.payName || (payOf(s.pay) || {}).name || "Not recorded";
+const ticketPay = t => (t && activePays().some(p => p.id === t.pay)) ? t.pay : activePays()[0].id;
+const feeText = m => {
+  const bits = [];
+  if (+m.pct) bits.push((+m.pct) + "%");
+  if (+m.fixed) bits.push(cur(+m.fixed));
+  return bits.length ? bits.join(" + ") : "no fee";
+};
+function stampPay(sale, m) {
+  sale.pay = m.id; sale.payName = m.name;
+  sale.payPct = +m.pct || 0; sale.payFixed = +m.fixed || 0;
+  sale.fee = feeFor(m, sale.total);
+}
+/* one row per way of paying: how many, what the customer paid, what reached you */
+function payBreakdown(sales) {
+  const by = {};
+  for (const s of sales) {
+    const k = salePayName(s);
+    by[k] = by[k] || { name: k, n: 0, taken: 0, fee: 0 };
+    by[k].n++; by[k].taken += +s.total || 0; by[k].fee += saleFee(s);
+  }
+  return Object.values(by).sort((a, b) => b.taken - a.taken);
+}
+const payRows = rows => rows.map(r => `<div class="inset">
+    <span class="b"><span class="n">${esc(r.name)}</span>
+      <span class="s">${r.n} sale${r.n === 1 ? "" : "s"} · paid ${esc(cur(r.taken))}${r.fee >= 0.005 ? " · fees −" + esc(cur(r.fee)) : ""}</span></span>
+    <span class="r">${esc(cur(r.taken - r.fee))}</span></div>`).join("");
+
+/* the ways people can pay, and what each one keeps */
+function paySheet(after) {
+  let rows = payMethods().map(p => ({ ...p }));
+  const draw = () => {
+    sheet("Ways to pay", `
+      <p class="note">What each one keeps from a sale. Switch one off to take it off the ticket until you need it — it keeps its fee and its history. Venmo's goods-and-services fee is 1.9% + $0.10.
+        A change here only affects sales from now on — past sales keep the fee they were rung up with.</p>
+      ${rows.map((r, i) => `<div class="grp">
+        <div class="gh" style="align-items:flex-end">
+          <label class="f" style="margin-bottom:0;flex:1"><span class="t">Name</span>
+            <input type="text" data-pn="${i}" value="${esc(r.name)}"></label>
+          <button class="tog sm" data-pon="${i}" aria-pressed="${!r.off}" style="flex:0 0 auto">${r.off ? "Switched off" : "On the ticket"}</button>
+        </div>
+        <div class="rowf">
+          <label class="f" style="margin-bottom:0"><span class="t">Percent kept</span>
+            <input type="number" inputmode="decimal" step="0.01" min="0" data-pp="${i}" value="${+r.pct || 0}"></label>
+          <label class="f" style="margin-bottom:0"><span class="t">Plus per sale ($)</span>
+            <input type="number" inputmode="decimal" step="0.01" min="0" data-pf="${i}" value="${+r.fixed || 0}"></label>
+          ${rows.length > 1 ? `<button class="xbtn" data-px="${i}" aria-label="Remove ${esc(r.name)}" style="align-self:flex-end;flex:0 0 44px;min-width:44px">${ICON.closeSm}</button>` : ""}
+        </div>
+      </div>`).join("")}
+      <button class="btn sec sm" id="payAdd">+ Another way to pay</button>
+      <p class="note" style="margin-top:14px">The first one that's switched on is what every new ticket starts on.</p>
+    `, [{ label: "Save", cls: "btn", id: "paySave" }], { narrow: true });
+    const grab = () => {
+      document.querySelectorAll("[data-pn]").forEach(x => rows[+x.dataset.pn].name = x.value);
+      document.querySelectorAll("[data-pp]").forEach(x => rows[+x.dataset.pp].pct = Math.max(0, +x.value || 0));
+      document.querySelectorAll("[data-pf]").forEach(x => rows[+x.dataset.pf].fixed = Math.max(0, +x.value || 0));
+    };
+    document.querySelectorAll("[data-pon]").forEach(b => b.onclick = () => { grab(); const r = rows[+b.dataset.pon]; r.off = !r.off; draw(); });
+    document.querySelectorAll("[data-px]").forEach(b => b.onclick = () => { grab(); rows.splice(+b.dataset.px, 1); draw(); });
+    $("#payAdd").onclick = () => { grab(); rows.push({ id: uid(), name: "", pct: 0, fixed: 0 }); draw(); };
+    $("#paySave").onclick = async () => {
+      grab();
+      rows = rows.map(r => ({ ...r, name: String(r.name || "").trim() })).filter(r => r.name);
+      if (!rows.length) { toast("Keep at least one"); return; }
+      if (!rows.some(r => !r.off)) { toast("Keep at least one switched on"); return; }
+      S.settings.payMethods = rows;
+      await saveSettings();
+      closeSheet();
+      renderTicket();
+      if (after) after();
+      toast("Saved");
+    };
+  };
+  draw();
+}
 /* "the cart" is whatever the open ticket is holding */
 Object.defineProperty(S, "cart", {
   get: () => cart(),
@@ -2710,6 +2816,8 @@ function renderTicket() {
   const n = ticketCount(t);
   const total = ticketTotal(t);
   const listed = (t.lines || []).reduce((a, l) => a + l.base * l.qty, 0);
+  const pay = payOf(ticketPay(t));
+  const fee = feeFor(pay, total);
 
   host.innerHTML = `<div class="ticket open">
       <div class="thead">
@@ -2724,6 +2832,9 @@ function renderTicket() {
       <div class="tfoot">
         ${listed > total ? `<div class="saverow"><span>Deals &amp; gifts</span><span>−${esc(cur(listed - total))}</span></div>` : ""}
         <div class="totalblock"><span class="k">Total</span><span class="v">${esc(cur(total))}</span></div>
+        <div class="payhead"><span class="k">Paid by</span><button class="tlink" id="payEdit">Fees</button></div>
+        <div class="seg paysel">${activePays().map(m => `<button data-pay="${esc(m.id)}" aria-selected="${m.id === pay.id}">${esc(m.name)}</button>`).join("")}</div>
+        ${fee ? `<div class="saverow payfee"><span>${esc(pay.name)} keeps ${esc(cur(fee))}</span><span>You get ${esc(cur(total - fee))}</span></div>` : ""}
         <button class="btn" id="completeBtn">Complete order</button>
         <button class="btn ghost" id="clearBtn">Start over</button>
       </div>
@@ -2760,6 +2871,11 @@ function renderTicket() {
       yes: "Close it", onYes: go
     });
   });
+  host.querySelectorAll("[data-pay]").forEach(b => b.onclick = async () => {
+    t.pay = b.dataset.pay;
+    await saveTickets(); renderTicket();
+  });
+  $("#payEdit").onclick = () => paySheet();
   if ($("#newTicket")) $("#newTicket").onclick = async () => {
     const fresh = newTicket();
     S.tickets.push(fresh);
@@ -2851,14 +2967,19 @@ async function completeOrder() {
   };
   sale.cost = sale.lines.reduce((a, l) => a + l.costTotal, 0);
   sale.profit = sale.total - sale.cost;
+  const tk = ensureTicket();
+  const pm = payOf(ticketPay(tk));
+  stampPay(sale, pm);
   await salePut(sale); S.sales.push(sale);
   if (drew) { await saveLots(); refreshLists(); }
   setCart([]);
+  delete tk.pay;   /* the next customer starts on the usual way to pay */
   await saveTickets();
   renderTicket();
   renderSession();
   if (shortOf.length) toast("More " + shortOf[0] + " than you had", "Top up", () => setTab("items"));
-  toast("Sold! " + cur(sale.total), "Undo", () => undoSale(sale));
+  toast("Sold! " + cur(sale.total) + " · " + pm.name + (sale.fee ? " · you get " + cur(saleNet(sale)) : ""),
+    "Undo", () => undoSale(sale));
 };
 
 
@@ -3713,7 +3834,6 @@ function materialSheet(existing) {
         <div class="rowf" style="align-items:center">
           <span class="av" id="mPrev" style="flex:0 0 64px;${m.photo ? `background-image:url('${m.photo}')` : ""}"></span>
           <input type="file" id="mFile" accept="image/*" style="flex:1;border:0;padding:0;background:none">
-          <button class="xbtn" id="mAdjust" aria-label="Move or zoom the photo" title="Move or zoom"${m.photo ? "" : " hidden"}>${ICON_CROP}</button>
           <button class="xbtn" id="mClearPhoto" aria-label="Remove photo">✕</button>
         </div></label>
       <div class="rowf">
@@ -3851,7 +3971,12 @@ function materialSheet(existing) {
     if ($("#catBox")) drawCat();
 
     if ($("#mSell")) $("#mSell").onclick = () => { readDetails(); m.forSale = !forSale(m); draw(); };
-    wirePhoto(m, "m");
+    if ($("#mClearPhoto")) $("#mClearPhoto").onclick = () => { m.photo = ""; $("#mPrev").style.backgroundImage = ""; };
+    if ($("#mFile")) $("#mFile").onchange = async e => {
+      const f = e.target.files[0]; if (!f) return;
+      m.photo = await shrink(f);
+      $("#mPrev").style.backgroundImage = `url('${m.photo}')`;
+    };
     if ($("#mOn")) $("#mOn").onclick = () => { readDetails(); m.active = true; draw(); };
     if ($("#mOff")) $("#mOff").onclick = () => { readDetails(); m.active = false; draw(); };
     if ($("#mUnit")) $("#mUnit").onchange = () => redraw();
@@ -4078,7 +4203,6 @@ function itemSheet(item) {
         <div class="rowf" style="align-items:center">
           <span class="av" id="iPrev" style="flex:0 0 64px;${it.photo ? `background-image:url('${it.photo}')` : ""}"></span>
           <input type="file" id="iFile" accept="image/*" style="flex:1;border:0;padding:0;background:none">
-          <button class="xbtn" id="iAdjust" aria-label="Move or zoom the photo" title="Move or zoom"${it.photo ? "" : " hidden"}>${ICON_CROP}</button>
           <button class="xbtn" id="iClearPhoto" aria-label="Remove photo">✕</button>
         </div></label>
 
@@ -4246,7 +4370,12 @@ function itemSheet(item) {
       if (stored) { stored.stockMode = it.stockMode; await saveItems(); refreshLists(); }
     };
     $("#iMto").onclick = () => { readTop(); it.madeToOrder = !it.madeToOrder; draw(); };
-    wirePhoto(it, "i");
+    $("#iClearPhoto").onclick = () => { it.photo = ""; $("#iPrev").style.backgroundImage = ""; };
+    $("#iFile").onchange = async e => {
+      const f = e.target.files[0]; if (!f) return;
+      it.photo = await shrink(f);
+      $("#iPrev").style.backgroundImage = `url('${it.photo}')`;
+    };
   };
 
   draw();
@@ -4283,17 +4412,17 @@ function itemSheet(item) {
   });
 }
 
-function shrink(file, max, quality) {
+function shrink(file) {
   return new Promise(res => {
     const r = new FileReader();
     r.onload = () => {
       const img = new Image();
       img.onload = () => {
-        const M = max || 520, sc = Math.min(1, M / Math.max(img.width, img.height));
+        const M = 520, sc = Math.min(1, M / Math.max(img.width, img.height));
         const c = document.createElement("canvas");
         c.width = Math.round(img.width * sc); c.height = Math.round(img.height * sc);
         c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
-        res(c.toDataURL("image/jpeg", quality || 0.72));
+        res(c.toDataURL("image/jpeg", 0.72));
       };
       img.onerror = () => res("");
       img.src = r.result;
@@ -4436,7 +4565,9 @@ function reportTakings() {
   const taken = lines.reduce((a, l) => a + l.total, 0);
   const goods = lines.reduce((a, l) => a + l.costTotal, 0);
   const fees = evs.reduce((a, v) => a + appCosts(v.ev, v.app), 0);
-  const net = taken - goods - fees;
+  const payFees = sales.reduce((a, s) => a + saleFee(s), 0);
+  const net = taken - goods - fees - payFees;
+  const payBy = payBreakdown(sales);
   const qty = lines.reduce((a, l) => a + l.qty, 0);
   const free = lines.filter(l => l.mode === "free");
   const freeQty = free.reduce((a, l) => a + l.qty, 0);
@@ -4507,6 +4638,8 @@ function reportTakings() {
       <div class="n">what went into them</div></div>
     <div class="kpi big"><div class="k">Stalls &amp; travel</div><div class="v">${esc(cur(fees))}</div>
       <div class="n">${evs.length} visit${evs.length === 1 ? "" : "s"}</div></div>
+    ${payFees >= 0.005 ? `<div class="kpi big"><div class="k">Payment fees</div><div class="v">${esc(cur(payFees))}</div>
+      <div class="n">kept by Venmo and the like</div></div>` : ""}
     <div class="kpi big tint"><div class="k">Money kept</div><div class="v">${esc(cur(net))}</div>
       <div class="n">${[
         freeQty ? freeQty + " given away (" + esc(cur(freeVal)) + ")" : "",
@@ -4515,6 +4648,10 @@ function reportTakings() {
         pracQty ? pracQty + " practice (" + esc(cur(pracCost)) + ")" : ""
       ].filter(Boolean).join(" · ") || "after everything"}</div></div>
   </div>
+
+  ${payBy.length ? `<div class="card"><div class="sect" style="margin-top:0">How people paid</div>
+    ${payRows(payBy)}
+    <p class="note" style="margin:10px 0 0">The right-hand figure is what reached you. Sales from before this was added show as Not recorded.</p></div>` : ""}
 
   ${byDay.length ? `<div class="card"><div class="sect" style="margin-top:0">Every market day</div>
     <p class="note" style="margin-top:-6px">Tap a date to see every sale on it, and to reverse one.</p>
@@ -4561,13 +4698,24 @@ function dayReport(dayId) {
   const sales = S.sales.filter(s => s.dayId === dayId).sort((a, b) => a.ts - b.ts);
   const revs = S.reversals.filter(r => r.dayId === dayId).sort((a, b) => b.ts - a.ts);
   const taken = sales.reduce((a, s) => a + s.total, 0);
+  const dayFees = sales.reduce((a, s) => a + saleFee(s), 0);
   const things = sales.reduce((a, s) => a + s.lines.reduce((b, l) => b + l.qty, 0), 0);
+  const payPick = s => {
+    const ms = payMethods();
+    const known = ms.some(m => m.id === s.pay);
+    return `<select class="paypick" data-paysale="${s.id}" aria-label="Paid by">
+      ${known ? "" : `<option value="" selected>${esc(s.pay ? salePayName(s) : "Paid by?")}</option>`}
+      ${ms.map(m => `<option value="${esc(m.id)}"${m.id === s.pay ? " selected" : ""}>${esc(m.name)}</option>`).join("")}
+    </select>`;
+  };
 
   const saleBlock = (s, n) => `<div class="grp">
     <div class="gh" style="margin-bottom:8px">
       <span style="flex:1;min-width:0"><b style="font-family:var(--display);font-size:17px">Sale ${n}</b>
         <span class="note" style="margin:0 0 0 6px">${esc(saleTime(s.ts))}</span></span>
-      <b style="font-family:var(--display);font-size:18px">${esc(cur(s.total))}</b>
+      ${payPick(s)}
+      <span style="text-align:right"><b style="font-family:var(--display);font-size:18px">${esc(cur(s.total))}</b>
+        ${saleFee(s) ? `<span class="note" style="display:block;margin:0;font-size:12px">−${esc(cur(saleFee(s)))} fee</span>` : ""}</span>
       ${s.lines.length > 1 ? `<button class="tlink" data-rev-sale="${s.id}">Reverse sale</button>` : ""}
     </div>
     ${s.lines.map((l, i) => {
@@ -4584,10 +4732,12 @@ function dayReport(dayId) {
 
   sheet(esc(c.event) + `<span style="display:block;font-family:var(--body);font-weight:600;font-size:15px;color:var(--ink-mute);margin-top:2px">${esc(fmtDate(c.date, true) || "No date")}</span>`, `
     <div class="kpis" style="grid-template-columns:repeat(2,1fr)">
-      <div class="kpi tint"><div class="k">Taken</div><div class="v">${esc(cur(taken))}</div></div>
+      <div class="kpi tint"><div class="k">Taken</div><div class="v">${esc(cur(taken))}</div>
+        ${dayFees >= 0.005 ? `<div class="n">${esc(cur(taken - dayFees))} after fees</div>` : ""}</div>
       <div class="kpi"><div class="k">Sales</div><div class="v">${sales.length}</div>
         <div class="n">${things} thing${things === 1 ? "" : "s"}</div></div>
     </div>
+    ${sales.length ? `<div class="card">${payRows(payBreakdown(sales))}</div>` : ""}
     ${sales.length ? sales.map((s, i) => saleBlock(s, i + 1)).join("")
       : '<p class="note">No sales left on this day.</p>'}
     ${revs.length ? `<div class="slabel">Reversed</div>
@@ -4599,6 +4749,16 @@ function dayReport(dayId) {
       </div>`).join("")}` : ""}
   `, null);
 
+  document.querySelectorAll("[data-paysale]").forEach(x => x.onchange = async () => {
+    const s = S.sales.find(y => y.id === x.dataset.paysale);
+    const m = payOf(x.value);
+    if (!s || !m) return;
+    stampPay(s, m);
+    await salePut(s);
+    renderSession(); if (S.tab === "reports") renderReports();
+    dayReport(dayId);
+    toast("Sale marked " + m.name);
+  });
   document.querySelectorAll("[data-rev-sale]").forEach(b => b.onclick = () => {
     const s = S.sales.find(x => x.id === b.dataset.revSale);
     if (s) reverseAsk(s, null);
@@ -4773,6 +4933,7 @@ async function doReverse(sale, rows) {
     sale.total = m4(sale.lines.reduce((a, l) => a + l.total, 0));
     sale.cost = m4(sale.lines.reduce((a, l) => a + l.costTotal, 0));
     sale.profit = m4(sale.total - sale.cost);
+    if (sale.pay) sale.fee = feeFor({ pct: sale.payPct, fixed: sale.payFixed }, sale.total);
     await salePut(sale);
   } else {
     await saleDel(sale.id);
@@ -5100,15 +5261,17 @@ function bindExports() {
     const q = v => '"' + String(v == null ? "" : v).replace(/"/g, '""') + '"';
     const head = ["sale_id", "date", "time", "hour", "event", "event_type", "item", "options", "qty",
       "list_price", "unit_price", "unit_cost", "price_mode", "discount_type", "discount_value",
-      "reason", "line_total", "line_cost", "line_margin", "units_unstocked"];
+      "reason", "line_total", "line_cost", "line_margin", "units_unstocked", "paid_by", "sale_fee"];
     const rows = [head.join(",")];
     for (const s of S.sales) {
       const c = ctxOf(s.dayId), d = new Date(s.ts);
-      for (const l of s.lines) rows.push([s.id, c.date, d.toTimeString().slice(0, 5), d.getHours(), c.event, c.type,
+      /* the fee belongs to the whole sale, so it sits on its first line only — summing the column stays right */
+      s.lines.forEach((l, li) => rows.push([s.id, c.date, d.toTimeString().slice(0, 5), d.getHours(), c.event, c.type,
         l.name, l.opts.map(o => o.g + ": " + o.o).join(" | "), l.qty, l.base, l.unit, l.cost, l.mode,
         l.mode === "discount" ? l.dType : (l.mode === "set" ? "set" : (l.mode === "replace" ? "replacement fee" : "")),
         (l.mode === "discount" || l.mode === "set" || l.mode === "replace") ? l.dVal : "", l.reason,
-        l.total, l.costTotal, l.total - l.costTotal, l.short || 0].map(q).join(","));
+        l.total, l.costTotal, l.total - l.costTotal, l.short || 0,
+        salePayName(s), li === 0 ? saleFee(s) : ""].map(q).join(",")));
     }
     saveOut("stallbook-sales-" + todayISO() + ".csv", rows.join("\n"), "text/csv");
   };
@@ -5210,7 +5373,7 @@ const CASH_KINDS = {
 };
 /* [name, shown in / out] — the order lines appear in the statement */
 const CASH_GROUP = {
-  owner_in: ["Money put in", 1], sales: ["Takings", 1], stock: ["Stock bought", -1],
+  owner_in: ["Money put in", 1], sales: ["Takings", 1], payfee: ["Payment fees", -1], stock: ["Stock bought", -1],
   gear: ["Equipment", -1], stall: ["Stall fees and travel", -1], expense: ["Other expenses", -1],
   owner_out: ["Paid to owners", -1]
 };
@@ -5228,11 +5391,14 @@ function cashMoves() {
     const c = ctxOf(s.dayId);
     const date = c.date || isoOf(new Date(s.ts));
     const k = (s.dayId || "") + "|" + date;
-    byDay[k] = byDay[k] || { date, amount: 0, event: c.event };
+    byDay[k] = byDay[k] || { date, amount: 0, fee: 0, event: c.event };
     byDay[k].amount += +s.total || 0;
+    byDay[k].fee += saleFee(s);
   }
-  for (const d of Object.values(byDay)) if (d.amount)
-    out.push({ date: d.date, amount: d.amount, group: "sales", label: "Takings · " + d.event });
+  for (const d of Object.values(byDay)) {
+    if (d.amount) out.push({ date: d.date, amount: d.amount, group: "sales", label: "Takings · " + d.event });
+    if (d.fee >= 0.005) out.push({ date: d.date, amount: -c2(d.fee), group: "payfee", label: "Payment fees · " + d.event });
+  }
   for (const l of S.lots) {
     const m = matById(lotRef(l));
     const cost = (+l.qty || 0) * (+l.unitCost || 0);
@@ -5264,7 +5430,7 @@ function reportCash() {
   const inR = moves.filter(m => inRange(m.date));
   const close = before + inR.reduce((a, m) => a + m.amount, 0);
   const sum = g => inR.filter(m => m.group === g).reduce((a, m) => a + m.amount, 0);
-  const trading = ["sales", "stock", "gear", "stall", "expense"].reduce((a, g) => a + sum(g), 0);
+  const trading = ["sales", "payfee", "stock", "gear", "stall", "expense"].reduce((a, g) => a + sum(g), 0);
   const paid = -sum("owner_out"), putIn = sum("owner_in");
   const hasStart = S.cash.some(c => c.kind === "start");
 
@@ -5324,7 +5490,7 @@ function reportCash() {
         <span class="r" style="font-size:15px;color:var(--ink-mute)">${m.bal < 0 ? "−" : ""}${esc(cur(Math.abs(m.bal)))}</span>
       </${m.entry ? "button" : "div"}>`).join("")}</div>
       ${ledger.length > 25 ? `<button class="btn ghost" id="cashAll">${S.cashAll ? "Just the latest 25" : "Show all " + ledger.length}</button>` : ""}
-      <p class="note" style="margin-top:12px">The right-hand figure is what was left after each one. Tap anything you entered yourself to change it. Takings count cash and card alike.</p>`
+      <p class="note" style="margin-top:12px">The right-hand figure is what was left after each one. Tap anything you entered yourself to change it. Takings are what customers paid; what Venmo and the like kept comes off as Payment fees.</p>`
       : '<p class="note">Nothing in these dates.</p>'}`;
 }
 
@@ -5588,7 +5754,6 @@ function assetSheet(existing) {
         <div class="rowf" style="align-items:center">
           <span class="av" id="gPrev" style="flex:0 0 64px;min-width:0;${a.photo ? `background-image:url('${a.photo}')` : ""}"></span>
           <input type="file" id="gFile" accept="image/*" style="flex:1;border:0;padding:0;background:none">
-          <button class="xbtn" id="gAdjust" aria-label="Move or zoom the photo" title="Move or zoom" style="flex:0 0 44px;min-width:0"${a.photo ? "" : " hidden"}>${ICON_CROP}</button>
           <button class="xbtn" id="gClearPhoto" aria-label="Remove photo" style="flex:0 0 44px;min-width:0">✕</button>
         </div></label>
       <div class="rowf">
@@ -5648,7 +5813,12 @@ function assetSheet(existing) {
     $("#gQty").oninput = showTotal;
     $("#gCost").oninput = showTotal;
     showTotal();
-    wirePhoto(a, "g");
+    $("#gClearPhoto").onclick = () => { a.photo = ""; $("#gPrev").style.backgroundImage = ""; };
+    $("#gFile").onchange = async e => {
+      const f = e.target.files[0]; if (!f) return;
+      a.photo = await shrink(f);
+      $("#gPrev").style.backgroundImage = `url('${a.photo}')`;
+    };
     document.querySelectorAll("[data-cond]").forEach(b => b.onclick = () => { read(); a.condition = b.dataset.cond; draw(); });
     $("#gOn").onclick = () => { read(); a.retired = false; draw(); };
     $("#gOff").onclick = () => { read(); a.retired = true; draw(); };
@@ -5690,180 +5860,6 @@ function assetSheet(existing) {
       }
     });
   };
-}
-
-/* ---------------------------- photo framing ----------------------------
-   A picked photo is kept twice: photoFull (the whole picture, up to 1200px)
-   and photo (the square the cards show). photoFrame remembers where the
-   square sits — zoom z (1 = whole short side fits) and centre cx/cy as
-   fractions of the picture — so reopening the framer starts where you left
-   it and re-framing never loses the edges of the original. Photos saved
-   before this existed have no photoFull; their current square becomes the
-   "whole picture" the first time they're adjusted. */
-function wirePhoto(obj, p) {
-  const prev = $(`#${p}Prev`), file = $(`#${p}File`), clr = $(`#${p}ClearPhoto`), adj = $(`#${p}Adjust`);
-  if (!prev) return;
-  const show = () => {
-    prev.style.backgroundImage = obj.photo ? `url('${obj.photo}')` : "";
-    if (adj) adj.hidden = !obj.photo;
-  };
-  const adjust = async () => {
-    if (!obj.photo) return;
-    const src = obj.photoFull || obj.photo;
-    const r = await cropPhoto(src, obj.photoFull ? obj.photoFrame : null);
-    if (!r) return;
-    obj.photoFull = src; obj.photo = r.photo; obj.photoFrame = r.frame; show();
-  };
-  // the preview sits inside the Photo label, so a tap on it would normally open
-  // the file picker; with a photo already there it opens the framer instead
-  prev.style.cursor = "pointer";
-  prev.onclick = e => { if (obj.photo) { e.preventDefault(); adjust(); } };
-  if (adj) adj.onclick = e => { e.preventDefault(); adjust(); };
-  if (clr) clr.onclick = e => {
-    e.preventDefault();
-    obj.photo = ""; delete obj.photoFull; delete obj.photoFrame; show();
-  };
-  if (file) file.onchange = async e => {
-    const f = e.target.files[0]; if (!f) return;
-    e.target.value = "";   // lets the same picture be picked again
-    const full = await shrink(f, 1200, 0.82);
-    if (!full) { toast("That picture couldn't be opened — try a JPEG or PNG"); return; }
-    const r = await cropPhoto(full, null);
-    if (!r) return;        // cancelled: keep whatever was there before
-    obj.photoFull = full; obj.photo = r.photo; obj.photoFrame = r.frame; show();
-  };
-}
-
-function cropPhoto(src, frame) {
-  return new Promise(resolve => {
-    const img = new Image();
-    img.onerror = () => resolve(null);
-    img.onload = () => openCropper(img, src, frame, resolve);
-    img.src = src;
-  });
-}
-
-function openCropper(img, src, frame, resolve) {
-  const W = img.naturalWidth, H = img.naturalHeight, mn = Math.min(W, H);
-  const MAXZ = 5, OUT = 600;
-  const MINZ = mn / Math.max(W, H);              // zoomed out far enough to see the whole picture
-  const start = { z: 1, cx: 0.5, cy: 0.5 };
-  let f = { ...start, ...(frame || {}) };
-
-  const w = document.createElement("div");
-  w.className = "scrim confirm cropper";
-  w.innerHTML = `<div class="sheet narrow" role="dialog" aria-modal="true" aria-label="Frame the photo">
-    <div class="shead"><h3>Frame the photo</h3>
-      <button class="pebble lg" data-x aria-label="Cancel">${ICON.close}</button></div>
-    <div class="sbody">
-      <div class="cropbox"><img alt="" draggable="false"></div>
-      <div class="cropzoom">
-        <button class="xbtn" data-zo aria-label="Zoom out">−</button>
-        <input type="range" min="${MINZ}" max="${MAXZ}" step="0.01" aria-label="Zoom">
-        <button class="xbtn" data-zi aria-label="Zoom in">+</button>
-      </div>
-      <p class="note cropnote">Drag to move the picture, pinch or use the slider to zoom. What's in the square is what the card shows.</p>
-    </div>
-    <div class="sfoot stack">
-      <button class="btn sec" data-all>Show it all</button>
-      <button class="btn sec" data-reset>Fill the square</button>
-      <button class="btn" data-use>Use this</button>
-    </div>
-  </div>`;
-  document.body.appendChild(w);
-  const box = w.querySelector(".cropbox"), el = box.querySelector("img"), zr = w.querySelector("input[type=range]");
-  el.src = src;
-
-  const V = () => box.clientWidth || 300;
-  const scale = () => f.z * V() / mn;           // screen px per picture px
-  const clamp = () => {
-    f.z = Math.min(MAXZ, Math.max(MINZ, f.z));
-    const half = mn / f.z / 2;                    // half the square's side, in picture px
-    // an edge of the picture can't come inside the square — unless the picture
-    // is narrower than the square that way, and then it just sits in the middle
-    f.cx = half * 2 >= W ? 0.5 : Math.min(1 - half / W, Math.max(half / W, f.cx));
-    f.cy = half * 2 >= H ? 0.5 : Math.min(1 - half / H, Math.max(half / H, f.cy));
-  };
-  const paint = () => {
-    clamp();
-    const s = scale(), v = V();
-    el.style.width = W * s + "px"; el.style.height = H * s + "px";
-    el.style.transform = `translate(${v / 2 - f.cx * W * s}px, ${v / 2 - f.cy * H * s}px)`;
-    zr.value = f.z;
-  };
-  // zoom keeping the picture point under (px,py) — box coords — where it is
-  const zoomAt = (nz, px, py) => {
-    const v = V(), s0 = scale();
-    const ix = f.cx * W + (px - v / 2) / s0, iy = f.cy * H + (py - v / 2) / s0;
-    f.z = Math.min(MAXZ, Math.max(MINZ, nz));
-    const s1 = scale();
-    f.cx = (ix - (px - v / 2) / s1) / W; f.cy = (iy - (py - v / 2) / s1) / H;
-    paint();
-  };
-
-  const pts = new Map();
-  let g = null;   // gesture start
-  const snap = () => {
-    const r = box.getBoundingClientRect(), a = [...pts.values()];
-    const mx = a.reduce((t, p) => t + p.x, 0) / a.length - r.left;
-    const my = a.reduce((t, p) => t + p.y, 0) / a.length - r.top;
-    const d = a.length > 1 ? Math.hypot(a[0].x - a[1].x, a[0].y - a[1].y) : 0;
-    return { mx, my, d };
-  };
-  const begin = () => { g = { ...snap(), f: { ...f } }; };
-  box.addEventListener("pointerdown", e => {
-    box.setPointerCapture(e.pointerId);
-    pts.set(e.pointerId, { x: e.clientX, y: e.clientY }); begin();
-  });
-  box.addEventListener("pointermove", e => {
-    if (!pts.has(e.pointerId) || !g) return;
-    pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
-    const now = snap();
-    f = { ...g.f };
-    if (now.d && g.d) zoomAt(g.f.z * now.d / g.d, g.mx, g.my);
-    const s = scale();
-    f.cx -= (now.mx - g.mx) / s / W; f.cy -= (now.my - g.my) / s / H;
-    paint();
-  });
-  const lift = e => { pts.delete(e.pointerId); if (pts.size) begin(); else g = null; };
-  box.addEventListener("pointerup", lift);
-  box.addEventListener("pointercancel", lift);
-  box.addEventListener("wheel", e => {
-    e.preventDefault();
-    const r = box.getBoundingClientRect();
-    zoomAt(f.z * Math.exp(-e.deltaY * 0.0022), e.clientX - r.left, e.clientY - r.top);
-  }, { passive: false });
-  zr.oninput = () => zoomAt(+zr.value, V() / 2, V() / 2);
-  w.querySelector("[data-zo]").onclick = () => zoomAt(f.z / 1.25, V() / 2, V() / 2);
-  w.querySelector("[data-zi]").onclick = () => zoomAt(f.z * 1.25, V() / 2, V() / 2);
-  w.querySelector("[data-reset]").onclick = () => { f = { ...start }; paint(); };
-  w.querySelector("[data-all]").onclick = () => { f = { z: MINZ, cx: 0.5, cy: 0.5 }; paint(); };
-
-  const onKey = e => { if (e.key === "Escape") { e.stopPropagation(); done(null); } };
-  const onResize = () => paint();
-  window.addEventListener("keydown", onKey, true);
-  window.addEventListener("resize", onResize);
-  function done(result) {
-    window.removeEventListener("keydown", onKey, true);
-    window.removeEventListener("resize", onResize);
-    w.remove(); resolve(result);
-  }
-  w.querySelector("[data-x]").onclick = () => done(null);
-  w.addEventListener("click", e => { if (e.target === w) done(null); });
-  w.querySelector("[data-use]").onclick = () => {
-    clamp();
-    const side = mn / f.z, o = Math.max(1, Math.min(OUT, Math.round(side)));
-    const c = document.createElement("canvas");
-    c.width = c.height = o;
-    const k = o / side, x = c.getContext("2d");
-    x.fillStyle = getComputedStyle(document.documentElement).getPropertyValue("--sand").trim() || "#f3efe6";
-    x.fillRect(0, 0, o, o);                     // shows around a zoomed-out picture
-    x.drawImage(img, (side / 2 - f.cx * W) * k, (side / 2 - f.cy * H) * k, W * k, H * k);
-    const r4 = n => Math.round(n * 10000) / 10000;
-    done({ photo: c.toDataURL("image/jpeg", 0.82), frame: { z: r4(f.z), cx: r4(f.cx), cy: r4(f.cy) } });
-  };
-  requestAnimationFrame(paint);
-  if (el.complete) paint(); else el.onload = paint;
 }
 
 /* ---------------------------- sheet + toast ---------------------------- */
