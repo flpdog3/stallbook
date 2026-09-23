@@ -38,7 +38,7 @@ const saleDel = id => req(tx("sales", "readwrite").delete(id));
 const S = {
   items: [], materials: [], categories: [], productTypes: [], events: [], days: [], sales: [], cart: [],
   lots: [], writeoffs: [], reversals: [], trash: [], orders: [], assets: [], cash: [],
-  tickets: [], activeTicket: null,
+  tickets: [], activeTicket: null, receipts: {},
   settings: { currency: "$", activeDay: null, lastBackup: null },
   tab: "sell"
 };
@@ -287,11 +287,12 @@ function appCosts(ev, a) {
 function appMoney(ev, a) {
   const ds = daysOfApp(a.id).map(d => d.id);
   const sales = S.sales.filter(s => ds.includes(s.dayId));
-  const taken = sales.reduce((x, s) => x + s.total, 0);
-  const goods = sales.reduce((x, s) => x + s.cost, 0);
-  const costs = appCosts(ev, a);
-  const payFees = sales.reduce((x, s) => x + saleFee(s), 0);
-  return { taken, goods, costs, payFees, net: taken - goods - costs - payFees, sales: sales.length };
+  const taken = r2(sales.reduce((x, s) => x + s.total, 0));
+  const tax = r2(sales.reduce((x, s) => x + saleTax(s), 0));
+  const fees = r2(sales.reduce((x, s) => x + saleFee(s), 0));
+  const goods = r2(sales.reduce((x, s) => x + s.cost, 0));
+  const costs = r2(appCosts(ev, a));
+  return { taken, tax, fees, goods, costs, net: r2(taken - tax - fees - goods - costs), sales: sales.length };
 }
 /* the most recent visit that has sales on it — "how did it go last time?" */
 function lastResult(ev) {
@@ -901,6 +902,7 @@ function defaultPicks(item) {
   S.orders = (await kvGet("orders")) || [];
   S.assets = (await kvGet("assets")) || [];
   S.cash = (await kvGet("cash")) || [];
+  S.receipts = (await kvGet("receipts")) || {};
   const tk = (await kvGet("tickets")) || {};
   S.tickets = tk.tickets || [];
   S.activeTicket = tk.active || null;
@@ -914,6 +916,12 @@ function defaultPicks(item) {
   await migrate();
   await migrateRecipes();
   await migrateEvents();
+  await sweepReceipts();
+  if (!S.settings.payMethods) { S.settings.payMethods = payMethods(); await saveSettings(); }
+  else if (!S.settings.payMethods.some(m => /venmo/i.test(m.name))) {
+    S.settings.payMethods = S.settings.payMethods.concat([{ id: "venmo", name: "Venmo", pct: 0, fixed: 0 }]);
+    await saveSettings();
+  }
   const seen = [...new Set(S.materials.map(m => m.category).filter(Boolean))];
   const missing = seen.filter(c => !S.categories.includes(c));
   if (missing.length) { S.categories = S.categories.concat(missing).sort(); await saveCategories(); }
@@ -928,6 +936,7 @@ function defaultPicks(item) {
     else navigator.serviceWorker.register("sw.js").catch(() => {});
   }
   renderAll();
+  netWatch();
 })();
 
 /* old shape: sessions [{id,date,location,eventType,notes}] and sales.sessionId */
@@ -1093,14 +1102,26 @@ function practiceAllowed() {
 function daySummary(d) {
   const sales = salesOfDay(d.id);
   const lines = sales.flatMap(x => x.lines || []);
+  const pays = {};
+  for (const s of sales) {
+    if (!(s.total > 0)) continue;
+    const k = saleHow(s);
+    pays[k] = (pays[k] || 0) + s.total;
+  }
   return {
     sales: sales.length,
     things: lines.reduce((a, l) => a + l.qty, 0),
     taken: sales.reduce((a, x) => a + x.total, 0),
-    fees: sales.reduce((a, x) => a + saleFee(x), 0),
-    pay: payBreakdown(sales),
+    tax: r2(sales.reduce((a, x) => a + saleTax(x), 0)),
+    fees: r2(sales.reduce((a, x) => a + saleFee(x), 0)),
+    pays,
     free: lines.filter(l => l.mode === "free").reduce((a, l) => a + l.qty, 0)
   };
+}
+/* "Cash $84 · Card $52" — in size order, biggest first */
+function payWords(d) {
+  const pays = daySummary(d).pays;
+  return Object.entries(pays).sort((a, b) => b[1] - a[1]).map(([k, v]) => k + " " + cur(v)).join(" · ");
 }
 
 /* Packing down: close the day, show what it came to, and nudge a backup
@@ -1110,26 +1131,41 @@ function finishDaySheet() {
   if (!d) return;
   const ev = evOf(d.eventId) || {};
   const t = daySummary(d);
+  const tr = trayNow(d);
   const cartLeft = cart().reduce((a, l) => a + l.qty, 0);
+  const countable = tr.hasFloat || tr.cashIn > 0 || tr.out > 0 || !!d.count;
+  const st = {};
+  const pays = Object.entries(t.pays).sort((a, b) => b[1] - a[1]);
 
   sheet("Done for today?", `
     <div class="kpis" style="margin-bottom:14px">
       <div class="kpi big tint"><div class="k">Taken today</div><div class="v">${esc(cur(t.taken))}</div>
         <div class="n">${t.sales} sale${t.sales === 1 ? "" : "s"} · ${t.things} thing${t.things === 1 ? "" : "s"}${t.free ? " · " + t.free + " given away" : ""}</div></div>
     </div>
-    ${t.sales ? `<div class="slabel">How people paid</div>
-      <div class="card">${payRows(t.pay)}</div>
-      ${t.fees >= 0.005 ? `<p class="note">${esc(cur(t.taken - t.fees))} actually reached you after ${esc(cur(t.fees))} in fees.</p>` : ""}` : ""}
+    ${pays.length ? `<div class="togs" style="margin-bottom:14px">
+      ${pays.map(([k, v]) => `<span class="fact">${esc(k)} · ${esc(cur(v))}</span>`).join("")}
+      ${t.fees ? `<span class="fact warn">${esc(cur(t.fees))} in fees</span>` : ""}
+      ${t.tax ? `<span class="fact">${esc(cur(t.tax))} sales tax</span>` : ""}
+    </div>` : ""}
     <p class="note">${esc(ev.name || "This market")} on ${esc(fmtDate(d.date, true))}. Closing it just puts
       the till away — nothing is deleted, and you can open it again any time.</p>
     ${cartLeft ? `<p class="note" style="color:var(--warn-ink)"><b>${cartLeft} thing${cartLeft === 1 ? " is" : "s are"} still in the ticket.</b>
       Closing up clears it without recording a sale.</p>` : ""}
+    ${countable ? `<div class="sect">Count the tray</div>${trayBlock(d, st)}` : ""}
+    ${(() => {
+      const packed = Object.keys((d.pack || {}).out || {}).length;
+      return packed ? `<p class="note">${packed} thing${packed === 1 ? "" : "s"} went out today, so the load-out list
+        comes up next — tick each one as it goes back in the car.</p>` : "";
+    })()}
     <p class="note">A backup is saved as you close up.</p>
   `, [
     { label: "Close it up", cls: "btn", id: "fdGo" }
   ], { narrow: true });
 
+  if (countable) bindTray(d, st);
+
   $("#fdGo").onclick = async () => {
+    const diff = countable ? await saveTray(d, st) : null;
     d.closed = Date.now();
     S.settings.activeDay = null;
     setCart([]);
@@ -1138,7 +1174,13 @@ function finishDaySheet() {
     doBackup();
     await saveDays(); await saveSettings();
     closeSheet(); renderAll();
-    toast("Closed up — " + cur(t.taken) + " today");
+    const w = trayWords(diff);
+    toast("Closed up — " + cur(t.taken) + " today" + (diff === null ? "" : " · tray " + w.text.toLowerCase()));
+    /* straight into the load-out, but only if something was actually packed
+       and something is still out there */
+    const out = Object.keys((d.pack || {}).out || {});
+    const home = (d.pack || {}).back || {};
+    if (out.length && out.some(id => !home[id])) setTimeout(() => packSheet(d.id, "back"), 420);
   };
 }
 
@@ -1146,19 +1188,48 @@ function dayTakings() {
   const d = activeDay();
   return d ? salesOfDay(d.id).reduce((a, s) => a + s.total, 0) : 0;
 }
+/* How far today has gone towards paying for itself: the stall fee and the
+   travel, shared across the days of the visit, against what's been kept so
+   far — takings less sales tax, card fees and what the balloons cost.
+   Nothing to recoup means there's nothing to show. */
+function breakevenNow() {
+  const d = activeDay();
+  if (!d) return null;
+  const ev = evOf(d.eventId), app = appOfDay(d);
+  let need = 0;
+  if (ev && app) need = r2(appCosts(ev, app) / (daysOfApp(app.id).length || 1));
+  const made = r2(salesOfDay(d.id).reduce((a, s) => a + s.total - saleTax(s) - saleFee(s) - s.cost, 0));
+  return { need, made, pct: need > 0 ? made / need : 1, left: r2(Math.max(0, need - made)) };
+}
+
 function renderSession() {
   const d = activeDay();
   $("#dayVal").textContent = dayTitle(d);
   $("#dayBtn").classList.toggle("none", !d);
-  const takings = document.querySelector(".takings");
-  if (takings) takings.classList.toggle("hidden", !vendorMode());
-  $("#railTotal").textContent = cur(dayTakings());
+  /* Vendor view is yours, so it gets the running total. POS has a customer
+     leaning over it, so it gets the same square saying the same thing in
+     colour alone: red, then amber, then the rail's own green. */
+  const vend = vendorMode();
+  const money = $("#dayTakings");
+  if (money) {
+    money.classList.toggle("hidden", !vend || !d);
+    $("#railTotal").textContent = cur(dayTakings());
+  }
+  const meter = $("#dayMeter");
+  if (meter) {
+    const b = vend ? null : breakevenNow();
+    meter.className = "takings meter" + (!b ? " hidden" : b.pct >= 1 ? " on" : b.pct >= 0.5 ? " half" : " low");
+    meter.setAttribute("aria-label", !b ? "Nothing open"
+      : b.pct >= 1 ? "The day has paid for itself"
+      : cur(b.left) + " to go before the day pays for itself");
+  }
   const dot = document.querySelector('.navbtn[data-tab="events"] .nd');
   if (dot) dot.classList.toggle("hidden", !needsAttention());
   const sdot = document.querySelector('.navbtn[data-tab="stock"] .nd');
   if (sdot) sdot.classList.toggle("hidden", !inventoryNeedsAttention());
 }
 $("#dayBtn").onclick = dayPicker;
+if ($("#dayMeter")) $("#dayMeter").onclick = dayPicker;
 
 function dayPicker() {
   const withN = S.days.map(d => ({ d, n: daysUntil(d.date) }));
@@ -1180,6 +1251,7 @@ function dayPicker() {
         <span class="k" style="letter-spacing:0;text-transform:none;font-size:13px;font-weight:600;margin-top:2px">${esc(bits.join(" · ") || countdown(x.n))}</span>
       </span>
       ${open ? '<span class="st">Open now</span>' : (dayClosed(x.d) ? '<span class="st grey">Done</span>' : "")}
+      ${!open && x.n >= 0 ? `<span class="tlink" data-packday="${x.d.id}">Pack</span>` : ""}
     </button>`;
   };
 
@@ -1191,12 +1263,22 @@ function dayPicker() {
 
   sheet("Where are you selling?", `
     ${now.length ? `<div class="slabel">On today</div>${now.map(row).join("")}` : ""}
-    ${openNow ? `<div class="slabel">Open now</div>
+    ${openNow ? (() => {
+      const tr = trayNow(openNow);
+      return `<div class="slabel">Open now</div>
       <div class="card tint" style="margin-bottom:16px">
         <div style="font-family:var(--display);font-weight:700;font-size:20px;color:var(--green-deep)">${esc(dayTitle(openNow))}</div>
-        <div class="note" style="margin:2px 0 12px;color:#3f5c49">${esc(cur(t.taken))} from ${t.sales} sale${t.sales === 1 ? "" : "s"} so far</div>
-        <button class="btn sm" id="dpFinish">Done selling for today</button>
-      </div>` : ""}
+        <div class="note" style="margin:2px 0 12px;color:#3f5c49">${esc(cur(t.taken))} from ${t.sales} sale${t.sales === 1 ? "" : "s"} so far${
+          payWords(openNow) ? " · " + esc(payWords(openNow)) : ""}</div>
+        ${tr.hasFloat || tr.cashIn || tr.out ? `<div class="note" style="margin:-6px 0 12px;color:#3f5c49">
+          Tray should hold ${esc(cur(tr.expected))}${tr.hasFloat ? " · started with " + esc(cur(tr.float)) : ""}</div>` : ""}
+        <button class="btn sm" id="dpFinish" style="margin-bottom:10px">Done selling for today</button>
+        <div class="rowbtns">
+          <button class="btn white sm" id="dpTray">${tr.hasFloat ? "Change the float" : "Set the float"}</button>
+          <button class="btn white sm" id="dpOut">Out of the tray</button>
+        </div>
+      </div>`;
+    })() : ""}
     ${soon.length ? `<div class="slabel">Coming up</div>${soon.map(row).join("")}` : ""}
     ${past.length ? `<div class="slabel">Before</div>${past.map(row).join("")}` : ""}
     ${undated.length ? `<div class="slabel">Somewhere else — tap to sell there today</div>
@@ -1206,9 +1288,9 @@ function dayPicker() {
           <span class="k" style="letter-spacing:0;text-transform:none;font-size:13px;font-weight:600;margin-top:2px">${esc(e.type || "Adds today as a selling day")}</span></span>
       </button>`).join("")}` : ""}
     ${!S.days.length ? '<p class="note">No selling days yet. Make an event under <b>Events</b> — that holds its name, website and who to ring — then add an application with its dates.</p>' : ""}
-    <div class="slabel">Not on the list?</div>
-    <button class="btn sec sm" id="dpNew" style="margin-bottom:10px">Add an event and sell there today</button>
-    <button class="btn ghost" id="dpQuick">Just sell here today</button>
+    ${openNow ? "" : `<div class="slabel">Not on the list?</div>
+      <button class="btn sec sm" id="dpNew" style="margin-bottom:10px">Add an event and sell there today</button>
+      <button class="btn ghost" id="dpQuick">Just sell here today</button>`}
   `, null, { narrow: true });
 
   document.querySelectorAll("[data-open]").forEach(b => b.onclick = async () => {
@@ -1218,12 +1300,19 @@ function dayPicker() {
     await saveSettings();
     closeSheet(); renderSession(); renderGrid();
     toast("Open at " + dayTitle(activeDay()));
+    floatAsk(activeDay());
   });
   document.querySelectorAll("[data-today]").forEach(b => b.onclick = () => sellTodayAt(evOf(b.dataset.today)));
   if ($("#dpFinish")) $("#dpFinish").onclick = () => finishDaySheet();
-  $("#dpNew").onclick = () => eventSheet(null, { afterSave: ev => sellTodayAt(ev) });
+  if ($("#dpTray")) $("#dpTray").onclick = () => { const d = activeDay(); if (d) { delete d.float; delete d.floatAsked; floatAsk(d); } };
+  if ($("#dpOut")) $("#dpOut").onclick = () => { const d = activeDay(); if (d) trayOutSheet(d); };
+  document.querySelectorAll("[data-packday]").forEach(b => b.onclick = e => {
+    e.stopPropagation();
+    packSheet(b.dataset.packday, "out");
+  });
+  if ($("#dpNew")) $("#dpNew").onclick = () => eventSheet(null, { afterSave: ev => sellTodayAt(ev) });
   /* "My stall" is one event, reused, rather than a new one every time */
-  $("#dpQuick").onclick = async () => {
+  if ($("#dpQuick")) $("#dpQuick").onclick = async () => {
     let ev = S.events.find(e => String(e.name || "").trim().toLowerCase() === "my stall");
     if (!ev) {
       ev = Object.assign(blankEvent(), { name: "My stall", type: "", freq: "once", skip: ["once"] });
@@ -1374,6 +1463,7 @@ function paidCard(x) {
     </div>
     ${facts.length ? `<div class="facts">${facts.join("")}</div>` : ""}
     <div class="evacts">
+      ${ds.length ? `<button class="btn sm auto" data-pack="${ev.id}:${a.id}">Get packed</button>` : ""}
       <button class="btn sec sm auto" data-appopen="${ev.id}:${a.id}">Details</button>
       ${ev.org && ev.org.phone ? linkBtn("tel:" + ev.org.phone, "Ring them") : ""}
     </div>
@@ -1462,6 +1552,13 @@ function renderEvents() {
     await saveEvents(); renderEvents();
     toast(st === "paid" ? "Booked — its selling days are on the right" : statusLabel(st));
   });
+  p.querySelectorAll("[data-pack]").forEach(b => b.onclick = () => {
+    const [e, a] = b.dataset.pack.split(":");
+    const ev = evOf(e);
+    const app = ev && appOf(ev, a);
+    const d = app && packDayFor(app);
+    if (d) packSheet(d.id, "out");
+  });
   p.querySelectorAll("[data-sellday]").forEach(b => b.onclick = () => sellOnDay(b.dataset.sellday));
   renderSession();
 }
@@ -1474,6 +1571,7 @@ async function sellOnDay(id) {
   await saveSettings();
   renderSession(); renderGrid(); renderEvents();
   toast("Open at " + dayTitle(d));
+  floatAsk(d);
 }
 
 function retireAsk(ev, after) {
@@ -1603,6 +1701,10 @@ function eventSheet(existing, opts) {
     <div class="sect">Travel &amp; other</div>
     <label class="f"><span class="t">Travel &amp; other, each time you go</span><input type="number" id="eTravel" inputmode="decimal" step="0.01" min="0" value="${ev.travel || ""}"></label>
     <p class="note">Fuel, parking, a hotel — whatever it costs to get there. It comes off the profit for every visit you actually make.</p>
+    ${taxSet().on ? `<label class="f"><span class="t">Sales tax rate here, %</span>
+      <input type="number" id="eTax" inputmode="decimal" step="0.001" min="0" value="${ev.taxRate === undefined || ev.taxRate === null ? "" : esc(ev.taxRate)}"
+        placeholder="${esc(taxSet().rate)} — the usual rate"></label>
+    <p class="note">Only fill this in if this market sits in a different town or county with its own rate.</p>` : ""}
 
     ${existing ? `
       ${apps.length ? `<div class="sect">Latest application</div>${appSummary(existing, apps[0])}` : ""}
@@ -1721,6 +1823,10 @@ function eventSheet(existing, opts) {
     ev.freq = $("#eFreq").value;
     ev.remindDays = Math.max(0, Math.round(+$("#eRemind").value || 0));
     ev.travel = +$("#eTravel").value || 0;
+    if ($("#eTax")) {
+      const v = $("#eTax").value.trim();
+      if (v === "") delete ev.taxRate; else ev.taxRate = Math.max(0, +v || 0);
+    }
   };
   const valid = () => {
     if (!ev.name) { alert("Give the event its name — the formal one, like Middlesex County Fair."); return false; }
@@ -1821,6 +1927,7 @@ function appSheet(evId, appId, opts) {
 
     <div class="sect">What it costs</div>
     <label class="f"><span class="t">Booth / table fee</span><input type="number" id="aFee" inputmode="decimal" step="0.01" min="0" value="${a.fee || ""}"></label>
+    <div id="aRcpt">${receiptBlock(a.receipt)}</div>
     <p class="note">Counted against the profit once you're Booked &amp; paid. Travel is set on the event.</p>
 
     <div class="sect">Selling days</div>
@@ -1857,6 +1964,12 @@ function appSheet(evId, appId, opts) {
     opts.back ? { label: "Back to the event", cls: "btn sec", id: "apBack" } : null,
     existing ? { label: "Delete this application", cls: "btn sec", id: "apDel" } : null
   ].filter(Boolean));
+
+  const drawARc = () => {
+    $("#aRcpt").innerHTML = receiptBlock(a.receipt);
+    bindReceipt(() => a.receipt || "", v => { a.receipt = v || ""; }, drawARc);
+  };
+  drawARc();
 
   const drawDecl = () => {
     const box = $("#aDecl");
@@ -2027,6 +2140,7 @@ async function sellTodayAt(ev) {
   await saveEvents(); await saveDays(); await saveSettings();
   closeSheet(); renderAll();
   toast("Open at " + dayTitle(d));
+  floatAsk(d);
 }
 
 /* ---------------------------- calendar export ---------------------------- */
@@ -2140,109 +2254,87 @@ const ticketOf = id => S.tickets.find(t => t.id === id) || null;
 const cart = () => ensureTicket().lines;
 const setCart = lines => { ensureTicket().lines = lines; };
 const ticketName = (t, i) => t.label || ("Ticket " + (i + 1));
-const ticketTotal = t => (t.lines || []).reduce((a, l) => a + unitPrice(l) * l.qty, 0);
+const ticketSub = t => (t.lines || []).reduce((a, l) => a + unitPrice(l) * l.qty, 0);
+/* what the customer hands over: when tax is added at the till it rides on top */
+const ticketTotal = t => ticketSub(t) + (taxSet().mode === "add" ? ticketTax(t) : 0);
 const ticketCount = t => (t.lines || []).reduce((a, l) => a + l.qty, 0);
 
-/* ---------------------------- paying ----------------------------
-   How the customer paid decides what actually reaches the business. Cash
-   lands whole; Venmo keeps 1.9% + 10¢. A sale still records what the customer
-   paid — that was the price — and keeps the fee alongside, with the rates
-   used, so Reports and Cash flow can show what really arrived. Changing a
-   fee later only affects sales from then on.
-   ------------------------------------------------------------------ */
-const PAY_START = [
-  { id: "cash", name: "Cash", pct: 0, fixed: 0 },
-  { id: "card", name: "Card", pct: 0, fixed: 0 },
-  { id: "venmo", name: "Venmo", pct: 1.9, fixed: 0.10 }
-];
-const payMethods = () => (S.settings.payMethods && S.settings.payMethods.length)
-  ? S.settings.payMethods : PAY_START.map(p => ({ ...p }));
-const payOf = id => payMethods().find(p => p.id === id) || null;
-/* a way to pay can be switched off (card, before you have a reader) without losing it */
-const activePays = () => { const a = payMethods().filter(p => !p.off); return a.length ? a : payMethods().slice(0, 1); };
-const c2 = n => Math.round(n * 100) / 100;
-function feeFor(rates, total) {
-  if (!rates || !(total > 0)) return 0;
-  const f = total * (+rates.pct || 0) / 100 + (+rates.fixed || 0);
-  return Math.min(total, Math.max(0, c2(f)));
-}
-const saleFee = s => +s.fee || 0;
-const saleNet = s => (+s.total || 0) - saleFee(s);
-const salePayName = s => s.payName || (payOf(s.pay) || {}).name || "Not recorded";
-const ticketPay = t => (t && activePays().some(p => p.id === t.pay)) ? t.pay : activePays()[0].id;
-const feeText = m => {
-  const bits = [];
-  if (+m.pct) bits.push((+m.pct) + "%");
-  if (+m.fixed) bits.push(cur(+m.fixed));
-  return bits.length ? bits.join(" + ") : "no fee";
-};
-function stampPay(sale, m) {
-  sale.pay = m.id; sale.payName = m.name;
-  sale.payPct = +m.pct || 0; sale.payFixed = +m.fixed || 0;
-  sale.fee = feeFor(m, sale.total);
-}
-/* one row per way of paying: how many, what the customer paid, what reached you */
-function payBreakdown(sales) {
-  const by = {};
-  for (const s of sales) {
-    const k = salePayName(s);
-    by[k] = by[k] || { name: k, n: 0, taken: 0, fee: 0 };
-    by[k].n++; by[k].taken += +s.total || 0; by[k].fee += saleFee(s);
-  }
-  return Object.values(by).sort((a, b) => b.taken - a.taken);
-}
-const payRows = rows => rows.map(r => `<div class="inset">
-    <span class="b"><span class="n">${esc(r.name)}</span>
-      <span class="s">${r.n} sale${r.n === 1 ? "" : "s"} · paid ${esc(cur(r.taken))}${r.fee >= 0.005 ? " · fees −" + esc(cur(r.fee)) : ""}</span></span>
-    <span class="r">${esc(cur(r.taken - r.fee))}</span></div>`).join("");
+/* ---------------------------- paying and tax ----------------------------
+   Tax is off until you switch it on. With it on, prices either already
+   include it (the default — round prices are easier at a stall) or it is
+   added at the till. Each event can carry its own rate, and anything can be
+   marked tax-free from its price sheet.
 
-/* the ways people can pay, and what each one keeps */
-function paySheet(after) {
-  let rows = payMethods().map(p => ({ ...p }));
-  const draw = () => {
-    sheet("Ways to pay", `
-      <p class="note">What each one keeps from a sale. Switch one off to take it off the ticket until you need it — it keeps its fee and its history. Venmo's goods-and-services fee is 1.9% + $0.10.
-        A change here only affects sales from now on — past sales keep the fee they were rung up with.</p>
-      ${rows.map((r, i) => `<div class="grp">
-        <div class="gh" style="align-items:flex-end">
-          <label class="f" style="margin-bottom:0;flex:1"><span class="t">Name</span>
-            <input type="text" data-pn="${i}" value="${esc(r.name)}"></label>
-          <button class="tog sm" data-pon="${i}" aria-pressed="${!r.off}" style="flex:0 0 auto">${r.off ? "Switched off" : "On the ticket"}</button>
-        </div>
-        <div class="rowf">
-          <label class="f" style="margin-bottom:0"><span class="t">Percent kept</span>
-            <input type="number" inputmode="decimal" step="0.01" min="0" data-pp="${i}" value="${+r.pct || 0}"></label>
-          <label class="f" style="margin-bottom:0"><span class="t">Plus per sale ($)</span>
-            <input type="number" inputmode="decimal" step="0.01" min="0" data-pf="${i}" value="${+r.fixed || 0}"></label>
-          ${rows.length > 1 ? `<button class="xbtn" data-px="${i}" aria-label="Remove ${esc(r.name)}" style="align-self:flex-end;flex:0 0 44px;min-width:44px">${ICON.closeSm}</button>` : ""}
-        </div>
-      </div>`).join("")}
-      <button class="btn sec sm" id="payAdd">+ Another way to pay</button>
-      <p class="note" style="margin-top:14px">The first one that's switched on is what every new ticket starts on.</p>
-    `, [{ label: "Save", cls: "btn", id: "paySave" }], { narrow: true });
-    const grab = () => {
-      document.querySelectorAll("[data-pn]").forEach(x => rows[+x.dataset.pn].name = x.value);
-      document.querySelectorAll("[data-pp]").forEach(x => rows[+x.dataset.pp].pct = Math.max(0, +x.value || 0));
-      document.querySelectorAll("[data-pf]").forEach(x => rows[+x.dataset.pf].fixed = Math.max(0, +x.value || 0));
-    };
-    document.querySelectorAll("[data-pon]").forEach(b => b.onclick = () => { grab(); const r = rows[+b.dataset.pon]; r.off = !r.off; draw(); });
-    document.querySelectorAll("[data-px]").forEach(b => b.onclick = () => { grab(); rows.splice(+b.dataset.px, 1); draw(); });
-    $("#payAdd").onclick = () => { grab(); rows.push({ id: uid(), name: "", pct: 0, fixed: 0 }); draw(); };
-    $("#paySave").onclick = async () => {
-      grab();
-      rows = rows.map(r => ({ ...r, name: String(r.name || "").trim() })).filter(r => r.name);
-      if (!rows.length) { toast("Keep at least one"); return; }
-      if (!rows.some(r => !r.off)) { toast("Keep at least one switched on"); return; }
-      S.settings.payMethods = rows;
-      await saveSettings();
-      closeSheet();
-      renderTicket();
-      if (after) after();
-      toast("Saved");
-    };
-  };
-  draw();
+   A sold line keeps what it was rung up at in total. Its tax sits beside it
+   in tax, with taxMode saying whether that was inside total or on top. So:
+     gross — what the customer paid for it
+     net   — what's yours once the tax is set aside
+   ------------------------------------------------------------------------ */
+const r2 = n => Math.round((+n || 0) * 100) / 100;
+const TAX_DEFAULT = { on: false, rate: 0, mode: "in" };
+const taxSet = () => Object.assign({}, TAX_DEFAULT, S.settings.tax || {});
+const evTaxRate = ev => {
+  if (!ev || ev.taxRate === undefined || ev.taxRate === null || ev.taxRate === "") return null;
+  const n = +ev.taxRate;
+  return isNaN(n) ? null : Math.max(0, n);
+};
+function taxRateFor(day) {
+  const t = taxSet();
+  if (!t.on) return 0;
+  const own = evTaxRate(day ? evOf(day.eventId) : null);
+  return own === null ? Math.max(0, +t.rate || 0) : own;
 }
+const lineTaxable = l => {
+  if (l.custom) return !l.taxFree;
+  const th = sellThing(l.itemId);
+  return !(th && th.taxFree);
+};
+function lineTaxNow(l, rate, mode) {
+  const amt = unitPrice(l) * l.qty;
+  if (!rate || !amt || !lineTaxable(l)) return 0;
+  return r2(mode === "add" ? amt * rate / 100 : amt - amt / (1 + rate / 100));
+}
+function ticketTax(t) {
+  const rate = taxRateFor(activeDay());
+  if (!rate) return 0;
+  const mode = taxSet().mode;
+  return r2((t.lines || []).reduce((a, l) => a + lineTaxNow(l, rate, mode), 0));
+}
+const lineTax = l => +l.tax || 0;
+const lineGross = l => (+l.total || 0) + (l.taxMode === "add" ? lineTax(l) : 0);
+const lineNet = l => (+l.total || 0) - (l.taxMode === "in" ? lineTax(l) : 0);
+const saleTax = s => +s.tax || 0;
+const saleFee = s => +s.fee || 0;
+
+/* Cash is always there. Card is always there too, with whatever the reader
+   charges. Anything else — Venmo, Zelle — is added in Paying & tax. */
+const PAY_START = [
+  { id: "card", name: "Card", pct: 0, fixed: 0 },
+  { id: "venmo", name: "Venmo", pct: 0, fixed: 0 }
+];
+const payMethods = () => S.settings.payMethods || PAY_START.map(x => Object.assign({}, x));
+/* the second big button on the ticket; everything else waits behind Other */
+function quickPay() {
+  const ms = payMethods();
+  return ms.find(m => m.id === S.settings.payQuick) || ms.find(m => m.id === "venmo") || ms[0] || null;
+}
+const payOthers = () => {
+  const q = quickPay();
+  return payMethods().filter(m => !q || m.id !== q.id);
+};
+function payName(id) {
+  if (id === "cash") return "Cash";
+  if (id === "none") return "Nothing to pay";
+  const m = payMethods().find(x => x.id === id);
+  return m ? m.name : "Not recorded";
+}
+const saleHow = s => s.pay ? (s.payName || payName(s.pay)) : "Not recorded";
+function feeFor(id, total) {
+  if (!(total > 0) || !id || id === "cash" || id === "none") return 0;
+  const m = payMethods().find(x => x.id === id);
+  return m ? r2(total * (+m.pct || 0) / 100 + (+m.fixed || 0)) : 0;
+}
+const changeCalcOn = () => S.settings.changeCalc !== false;
 /* "the cart" is whatever the open ticket is holding */
 Object.defineProperty(S, "cart", {
   get: () => cart(),
@@ -2329,7 +2421,10 @@ function renderGrid() {
         <button id="modePos" role="tab" aria-selected="${!vend}">POS</button>
         <button id="modeVendor" role="tab" aria-selected="${vend}">Vendor view</button>
       </div>
-      ${vend ? '<span class="note" style="margin:0">Set what you charge and what\'s on sale today. Customers never see this.</span>' : ""}
+      ${vend
+        ? `<button class="btn sec sm auto" id="payTaxBtn">Paying &amp; tax</button>
+           <span class="note" style="margin:0;flex:1;min-width:180px">Set what you charge and what's on sale today. Customers never see this.</span>`
+        : `<button class="btn sec sm auto" id="customBtn" style="margin-left:auto">+ Something else</button>`}
     </div>`;
 
   if (!S.items.length && !S.materials.some(forSale)) {
@@ -2379,6 +2474,8 @@ function bindMode() {
   const set = async v => { S.settings.sellMode = v; await saveSettings(); renderGrid(); renderSession(); };
   if ($("#modePos")) $("#modePos").onclick = () => set("pos");
   if ($("#modeVendor")) $("#modeVendor").onclick = () => set("vendor");
+  if ($("#customBtn")) $("#customBtn").onclick = () => customSheet(null);
+  if ($("#payTaxBtn")) $("#payTaxBtn").onclick = () => payTaxSheet();
 }
 
 /* Price lives with selling, so it's set from the tile. */
@@ -2413,6 +2510,7 @@ function priceSheet(it) {
       </div>`).join("")}</div>` : ""}
     <div class="togs" style="margin-top:14px">
       <button class="tog sm" id="pxOn" aria-pressed="${isMat ? forSale(it) : itemActive(it)}">On sale today</button>
+      ${taxSet().on ? `<button class="tog sm" id="pxTax" aria-pressed="${!it.taxFree}">Charge sales tax on it</button>` : ""}
     </div>
   `, [{ label: "Save", cls: "btn", id: "pxGo" }], { narrow: !optionMats.length });
 
@@ -2436,8 +2534,16 @@ function priceSheet(it) {
     const on = $("#pxOn").getAttribute("aria-pressed") !== "true";
     $("#pxOn").setAttribute("aria-pressed", String(on));
   };
+  if ($("#pxTax")) $("#pxTax").onclick = () => {
+    const on = $("#pxTax").getAttribute("aria-pressed") !== "true";
+    $("#pxTax").setAttribute("aria-pressed", String(on));
+  };
   $("#pxGo").onclick = async () => {
     it.price = +$("#pxVal").value || 0;
+    if ($("#pxTax")) {
+      if ($("#pxTax").getAttribute("aria-pressed") === "true") delete it.taxFree;
+      else it.taxFree = true;
+    }
     const on = $("#pxOn").getAttribute("aria-pressed") === "true";
     document.querySelectorAll("[data-delta]").forEach(inp => {
       const m = matById(inp.dataset.delta);
@@ -2780,6 +2886,7 @@ function lineRow(l, ticketId) {
     <button class="b" data-line="${l.uid}" data-tk="${ticketId}" style="text-align:left">
       <span class="n">${esc(l.name)}</span>
       ${words.length ? `<span class="o">${esc(words.join(" · "))}</span>` : ""}
+      ${l.custom && l.note ? `<span class="o">${esc(l.note)}</span>` : ""}
       ${chip}
     </button>
     <span class="amt">${u === 0 ? "—" : esc(cur(u * l.qty))}</span>
@@ -2815,9 +2922,10 @@ function renderTicket() {
   const i = S.tickets.indexOf(t);
   const n = ticketCount(t);
   const total = ticketTotal(t);
+  const sub = ticketSub(t);
+  const tax = ticketTax(t);
+  const addTax = taxSet().mode === "add";
   const listed = (t.lines || []).reduce((a, l) => a + l.base * l.qty, 0);
-  const pay = payOf(ticketPay(t));
-  const fee = feeFor(pay, total);
 
   host.innerHTML = `<div class="ticket open">
       <div class="thead">
@@ -2830,12 +2938,18 @@ function renderTicket() {
           : '<div class="tempty">Tap a balloon to start a sale.</div>'}
       </div>
       <div class="tfoot">
-        ${listed > total ? `<div class="saverow"><span>Deals &amp; gifts</span><span>−${esc(cur(listed - total))}</span></div>` : ""}
+        ${listed > sub ? `<div class="saverow"><span>Deals &amp; gifts</span><span>−${esc(cur(listed - sub))}</span></div>` : ""}
+        ${tax && addTax ? `<div class="saverow"><span>Before tax</span><span>${esc(cur(sub))}</span></div>
+          <div class="saverow"><span>Sales tax ${esc(pctWords(taxRateFor(activeDay())))}</span><span>+${esc(cur(tax))}</span></div>` : ""}
         <div class="totalblock"><span class="k">Total</span><span class="v">${esc(cur(total))}</span></div>
-        <div class="payhead"><span class="k">Paid by</span><button class="tlink" id="payEdit">Fees</button></div>
-        <div class="seg paysel">${activePays().map(m => `<button data-pay="${esc(m.id)}" aria-selected="${m.id === pay.id}">${esc(m.name)}</button>`).join("")}</div>
-        ${fee ? `<div class="saverow payfee"><span>${esc(pay.name)} keeps ${esc(cur(fee))}</span><span>You get ${esc(cur(total - fee))}</span></div>` : ""}
-        <button class="btn" id="completeBtn">Complete order</button>
+        ${tax && !addTax ? `<div class="saverow" style="margin-top:-4px"><span>Includes sales tax</span><span>${esc(cur(tax))}</span></div>` : ""}
+        ${t.lines.length && total <= 0
+          ? '<button class="btn" id="completeBtn">Complete order</button>'
+          : `<div class="payrow">
+              <button class="btn" id="payCash">Cash</button>
+              ${quickPay() ? `<button class="btn" id="payQuick">${esc(quickPay().name)}</button>` : ""}
+              <button class="btn sec" id="payOther" aria-label="Another way to pay">Other</button>
+            </div>`}
         <button class="btn ghost" id="clearBtn">Start over</button>
       </div>
     </div>
@@ -2871,11 +2985,6 @@ function renderTicket() {
       yes: "Close it", onYes: go
     });
   });
-  host.querySelectorAll("[data-pay]").forEach(b => b.onclick = async () => {
-    t.pay = b.dataset.pay;
-    await saveTickets(); renderTicket();
-  });
-  $("#payEdit").onclick = () => paySheet();
   if ($("#newTicket")) $("#newTicket").onclick = async () => {
     const fresh = newTicket();
     S.tickets.push(fresh);
@@ -2887,6 +2996,7 @@ function renderTicket() {
   host.querySelectorAll("[data-line]").forEach(b => b.onclick = () => {
     const l = cart().find(x => x.uid === b.dataset.line);
     if (!l) return;
+    if (l.custom) { customSheet(l); return; }
     const src = sellThing(l.itemId) ||
       { id: l.itemId, name: l.name, cost: l.unitCost, recipe: [], price: l.base };
     lineSheet(src, l);
@@ -2912,13 +3022,25 @@ function bindTicketFoot() {
       onYes: async () => { setCart([]); await saveTickets(); renderTicket(); toast("Cleared"); }
     });
   };
-  if (done) done.onclick = completeOrder;
+  if (done) done.onclick = () => completeOrder("none");
+  const ready = () => {
+    if (!cart().length) { toast("Add something first"); return false; }
+    if (!activeDay()) { dayPicker(); return false; }
+    return true;
+  };
+  if ($("#payCash")) $("#payCash").onclick = () => {
+    if (!ready()) return;
+    if (changeCalcOn()) changeSheet(); else completeOrder("cash");
+  };
+  if ($("#payQuick")) $("#payQuick").onclick = () => { if (ready()) completeOrder(quickPay().id); };
+  if ($("#payOther")) $("#payOther").onclick = () => { if (ready()) otherPaySheet(); };
 }
-async function completeOrder() {
+async function completeOrder(pay, cashInfo) {
   if (!cart().length) { toast("Add something first"); return; }
   const d = activeDay();
   if (!d) { dayPicker(); return; }
   let drew = false, shortOf = [];
+  const taxRate = taxRateFor(d), taxMode = taxSet().mode;
   const sale = {
     id: uid(), dayId: d.id, ts: Date.now(),
     lines: cart().map(l => {
@@ -2932,8 +3054,27 @@ async function completeOrder() {
         costTotal: (+l.unitCost || 0) * l.qty, draw: [], used: [], short: 0,
         picks: l.picks || {}
       };
+      if (l.custom) { line.custom = true; line.note = l.note || ""; if (l.taxFree) line.taxFree = true; }
+      const tax = lineTaxNow(l, taxRate, taxMode);
+      if (tax) { line.tax = tax; line.taxMode = taxMode; line.taxRate = taxRate; }
       const asMaterial = isMaterialSale(l.itemId) ? matById(l.itemId) : null;
-      if (asMaterial) {
+      if (l.custom && (l.uses || []).length) {
+        line.uses = l.uses.map(u => ({ id: u.id, qty: +u.qty || 0 }));
+        line.used = [];
+        line.costTotal = 0;
+        for (const u of line.uses) {
+          const m = matById(u.id);
+          if (!m || !(u.qty > 0)) continue;
+          const r = drawStock(u.id, "", u.qty * l.qty, lastCost(u.id));
+          line.used.push({ materialId: u.id, name: m.name, qty: u.qty * l.qty,
+            draw: r.draw, cost: r.cost, short: r.short });
+          line.costTotal += r.cost;
+          line.short += r.short;
+          if (r.short) shortOf.push(m.name);
+        }
+        line.cost = l.qty ? line.costTotal / l.qty : 0;
+        drew = true;
+      } else if (asMaterial) {
         const r = drawStock(asMaterial.id, "", l.qty, lastCost(asMaterial.id));
         line.used = [{ materialId: asMaterial.id, name: asMaterial.name, qty: l.qty,
           draw: r.draw, cost: r.cost, short: r.short }];
@@ -2963,23 +3104,28 @@ async function completeOrder() {
       }
       return line;
     }),
-    total: cart().reduce((a, l) => a + unitPrice(l) * l.qty, 0)
+    total: 0
   };
+  sale.total = r2(sale.lines.reduce((a, l) => a + lineGross(l), 0));
+  sale.tax = r2(sale.lines.reduce((a, l) => a + lineTax(l), 0));
+  sale.pay = sale.total > 0 ? (pay || "cash") : "none";
+  sale.payName = payName(sale.pay);
+  sale.fee = feeFor(sale.pay, sale.total);
+  if (sale.pay === "cash" && cashInfo && cashInfo.tendered != null) {
+    sale.tendered = r2(cashInfo.tendered);
+    sale.change = r2(Math.max(0, cashInfo.tendered - sale.total));
+  }
   sale.cost = sale.lines.reduce((a, l) => a + l.costTotal, 0);
-  sale.profit = sale.total - sale.cost;
-  const tk = ensureTicket();
-  const pm = payOf(ticketPay(tk));
-  stampPay(sale, pm);
+  sale.profit = sale.total - sale.tax - sale.fee - sale.cost;
   await salePut(sale); S.sales.push(sale);
   if (drew) { await saveLots(); refreshLists(); }
   setCart([]);
-  delete tk.pay;   /* the next customer starts on the usual way to pay */
   await saveTickets();
   renderTicket();
   renderSession();
   if (shortOf.length) toast("More " + shortOf[0] + " than you had", "Top up", () => setTab("items"));
-  toast("Sold! " + cur(sale.total) + " · " + pm.name + (sale.fee ? " · you get " + cur(saleNet(sale)) : ""),
-    "Undo", () => undoSale(sale));
+  toast("Sold! " + cur(sale.total) + (sale.change ? " · " + cur(sale.change) + " change" : "")
+    + (sale.pay !== "cash" && sale.pay !== "none" ? " · " + sale.payName : ""), "Undo", () => undoSale(sale));
 };
 
 
@@ -3168,7 +3314,12 @@ function receiveSheet(o, m) {
       <label class="f"><span class="t">Arrived on</span><input type="date" id="rcDate" value="${todayISO()}"></label>
     </div>
     <label class="f"><span class="t">Note</span><input type="text" id="rcNote" value="${esc(o.note || "")}"></label>
+    <div id="rcRcpt">${receiptBlock("")}</div>
   `, [{ label: "Put it on the shelf", cls: "btn", id: "rcGo" }]);
+
+  let receipt = "";
+  const drawRc = () => { $("#rcRcpt").innerHTML = receiptBlock(receipt); bindReceipt(() => receipt, v => { receipt = v; }, drawRc); };
+  drawRc();
 
   $("#rcGo").onclick = async () => {
     const q = qtyRound(+$("#rcQty").value || 0, m.unit);
@@ -3176,7 +3327,7 @@ function receiveSheet(o, m) {
     S.lots.push({
       id: uid(), stockId: m.id, key: "", date: $("#rcDate").value || todayISO(),
       qty: q, remaining: q, unitCost: +$("#rcCost").value || 0,
-      note: $("#rcNote").value.trim(), created: Date.now()
+      note: $("#rcNote").value.trim(), created: Date.now(), receipt
     });
     o.status = "arrived";
     o.arrivedAt = Date.now();
@@ -3435,10 +3586,10 @@ async function trashDrop(id) {
    colour they picked, a shape twisted to order — cannot be re-sold, so it is
    a loss rather than stock.
    ------------------------------------------------------------------------ */
-const cartLineFrom = l => ({
+const cartLineFrom = l => Object.assign({
   uid: uid(), itemId: l.itemId, name: l.name, opts: l.opts, qty: l.qty, base: l.base,
-  unitCost: l.cost, mode: l.mode, dType: l.dType, dVal: l.dVal, reason: l.reason
-});
+  unitCost: l.cost, mode: l.mode, dType: l.dType, dVal: l.dVal, reason: l.reason, picks: l.picks || {}
+}, l.custom ? { custom: true, note: l.note || "", taxFree: !!l.taxFree, uses: (l.uses || []).map(u => ({ id: u.id, qty: u.qty })) } : {});
 
 async function finishUndo(sale, rows) {
   const backToStock = [], wasted = [];
@@ -3452,6 +3603,7 @@ async function finishUndo(sale, rows) {
 
   S.reversals.push({
     id: uid(), ts: Date.now(), dayId: sale.dayId, saleId: sale.id, total: sale.total,
+    pay: sale.pay || "", payName: sale.pay ? saleHow(sale) : "", undone: true,
     lines: sale.lines.map(l => {
       const r = rows.find(x => x.line === l);
       return {
@@ -3830,12 +3982,7 @@ function materialSheet(existing) {
           <input type="text" id="mName" value="${esc(m.name)}" placeholder="White"></label>
         <label class="f"><span class="t">Type</span><span id="catBox"></span></label>
       </div>
-      <label class="f"><span class="t">Photo</span>
-        <div class="rowf" style="align-items:center">
-          <span class="av" id="mPrev" style="flex:0 0 64px;${m.photo ? `background-image:url('${m.photo}')` : ""}"></span>
-          <input type="file" id="mFile" accept="image/*" style="flex:1;border:0;padding:0;background:none">
-          <button class="xbtn" id="mClearPhoto" aria-label="Remove photo">✕</button>
-        </div></label>
+      ${photoField(m, "m")}
       <div class="rowf">
         <label class="f"><span class="t">Counted in</span>${unitSelect("mUnit", m.unit)}</label>
         <label class="f"><span class="t">Warn me at or below</span>
@@ -3891,6 +4038,7 @@ function materialSheet(existing) {
         </div>
         <label class="f" style="margin-bottom:${existing ? "10px" : "0"}"><span class="t">Note</span>
           <input type="text" id="mlNote" placeholder="Bag of 100 from Partyline"></label>
+        <div id="mlRcpt">${receiptBlock(batchRcpt.id)}</div>
         ${existing ? '<button class="btn sec sm" id="mlAdd">Add to stock</button>'
                    : '<p class="note" style="margin:10px 0 0">Leave blank if you\'re only setting it up.</p>'}
       </div>`;
@@ -3936,6 +4084,13 @@ function materialSheet(existing) {
   };
 
   const stash = {};
+  /* a photo taken before the batch is saved has to survive the redraws */
+  const batchRcpt = { id: "" };
+  const bindBatchRcpt = () => {
+    if (!$("#mlRcpt")) return;
+    $("#mlRcpt").innerHTML = receiptBlock(batchRcpt.id);
+    bindReceipt(() => batchRcpt.id, v => { batchRcpt.id = v; }, () => { keepBatch(); bindBatchRcpt(); restoreBatch(); });
+  };
   const keepBatch = () => {
     ["mlDate", "mlQty", "mlCost", "mlNote"].forEach(id => { if ($("#" + id)) stash[id] = $("#" + id).value; });
   };
@@ -3944,6 +4099,7 @@ function materialSheet(existing) {
   };
 
   const bind = () => {
+    bindBatchRcpt();
     document.querySelectorAll("[data-acc]").forEach(b => b.onclick = () => {
       open[b.dataset.acc] = !open[b.dataset.acc];
       redraw();
@@ -3971,12 +4127,7 @@ function materialSheet(existing) {
     if ($("#catBox")) drawCat();
 
     if ($("#mSell")) $("#mSell").onclick = () => { readDetails(); m.forSale = !forSale(m); draw(); };
-    if ($("#mClearPhoto")) $("#mClearPhoto").onclick = () => { m.photo = ""; $("#mPrev").style.backgroundImage = ""; };
-    if ($("#mFile")) $("#mFile").onchange = async e => {
-      const f = e.target.files[0]; if (!f) return;
-      m.photo = await shrink(f);
-      $("#mPrev").style.backgroundImage = `url('${m.photo}')`;
-    };
+    wirePhoto(m, "m");
     if ($("#mOn")) $("#mOn").onclick = () => { readDetails(); m.active = true; draw(); };
     if ($("#mOff")) $("#mOff").onclick = () => { readDetails(); m.active = false; draw(); };
     if ($("#mUnit")) $("#mUnit").onchange = () => redraw();
@@ -4016,8 +4167,9 @@ function materialSheet(existing) {
       S.lots.push({
         id: uid(), stockId: m.id, key: "", date: $("#mlDate").value || todayISO(),
         qty: q, remaining: q, unitCost: c === "" ? lastCost(m.id) : (+c || 0),
-        note: $("#mlNote").value.trim(), created: Date.now()
+        note: $("#mlNote").value.trim(), created: Date.now(), receipt: batchRcpt.id
       });
+      batchRcpt.id = "";
       await saveLots(); draw(); refreshLists();
       toast(q + " added");
     };
@@ -4097,7 +4249,7 @@ function materialSheet(existing) {
         S.lots.push({
           id: uid(), stockId: m.id, key: "", date: $("#mlDate").value || todayISO(),
           qty: q, remaining: q, unitCost: +$("#mlCost").value || 0,
-          note: $("#mlNote").value.trim(), created: Date.now()
+          note: $("#mlNote").value.trim(), created: Date.now(), receipt: batchRcpt.id
         });
         await saveLots();
       }
@@ -4199,12 +4351,7 @@ function itemSheet(item) {
         <label class="f"><span class="t">Group</span><span id="groupBox"></span></label>
       </div>
 
-      <label class="f"><span class="t">Photo</span>
-        <div class="rowf" style="align-items:center">
-          <span class="av" id="iPrev" style="flex:0 0 64px;${it.photo ? `background-image:url('${it.photo}')` : ""}"></span>
-          <input type="file" id="iFile" accept="image/*" style="flex:1;border:0;padding:0;background:none">
-          <button class="xbtn" id="iClearPhoto" aria-label="Remove photo">✕</button>
-        </div></label>
+      ${photoField(it, "i")}
 
       <div class="sect">Cost to make</div>
       <div class="grp" style="margin-bottom:6px">
@@ -4299,6 +4446,7 @@ function itemSheet(item) {
   };
 
   /* ---- finished stock, only when you pre-make ---- */
+  const batchRcpt = { id: "" };
   const drawStockBits = () => {
     const box = $("#stockBits");
     if (!preMade()) { box.innerHTML = ""; return; }
@@ -4317,6 +4465,7 @@ function itemSheet(item) {
           <label class="f"><span class="t">How many</span><input type="number" id="lotQty" inputmode="numeric" step="1" min="1" placeholder="12"></label>
           <label class="f"><span class="t">Cost each</span><input type="number" id="lotCost" inputmode="decimal" step="0.01" min="0" placeholder="${(recipeCostEstimate(it) || 0).toFixed(2)}"></label>
         </div>
+        <div id="lotRcpt" style="grid-column:1/-1">${receiptBlock(batchRcpt.id)}</div>
         <button class="btn sec sm" id="lotAdd">Add to stock</button>
       </div>
       ${lots.length ? `<div class="card">${lots.map(l => `<div class="inset">
@@ -4326,6 +4475,10 @@ function itemSheet(item) {
         ${l.qty === l.remaining ? `<button class="xbtn" data-lotx="${l.id}" aria-label="Delete batch">✕</button>` : ""}
       </div>`).join("")}</div>` : ""}`;
 
+    if ($("#lotRcpt")) bindReceipt(() => batchRcpt.id, v => { batchRcpt.id = v; }, () => {
+      $("#lotRcpt").innerHTML = receiptBlock(batchRcpt.id);
+      bindReceipt(() => batchRcpt.id, v => { batchRcpt.id = v; }, drawStockBits);
+    });
     $("#iReorder").oninput = e => it.reorder = +e.target.value || 0;
     $("#lotAdd").onclick = async () => {
       const q = Math.round(+$("#lotQty").value || 0);
@@ -4334,8 +4487,9 @@ function itemSheet(item) {
       S.lots.push({
         id: uid(), stockId: it.id, itemId: it.id, key: "", date: $("#lotDate").value || todayISO(),
         qty: q, remaining: q, unitCost: c === "" ? (recipeCostEstimate(it) || 0) : (+c || 0),
-        note: "", created: Date.now()
+        note: "", created: Date.now(), receipt: batchRcpt.id
       });
+      batchRcpt.id = "";
       await saveLots(); readTop(); draw(); refreshLists();
       toast(q + " added");
     };
@@ -4370,12 +4524,8 @@ function itemSheet(item) {
       if (stored) { stored.stockMode = it.stockMode; await saveItems(); refreshLists(); }
     };
     $("#iMto").onclick = () => { readTop(); it.madeToOrder = !it.madeToOrder; draw(); };
-    $("#iClearPhoto").onclick = () => { it.photo = ""; $("#iPrev").style.backgroundImage = ""; };
-    $("#iFile").onchange = async e => {
-      const f = e.target.files[0]; if (!f) return;
-      it.photo = await shrink(f);
-      $("#iPrev").style.backgroundImage = `url('${it.photo}')`;
-    };
+    wirePhoto(it, "i");
+
   };
 
   draw();
@@ -4439,13 +4589,23 @@ const last30 = () => addDays(todayISO(), -29);
 const RF = { ev: "", type: "", from: last30(), to: todayISO(), pop: "name", popAll: false, report: "takings" };
 const REPORTS = [
   ["takings", "Takings"],
+  ["events", "Markets"],
+  ["hours", "By hour"],
   ["written", "Written off"],
-  ["cash", "Cash flow"]
+  ["tray", "Cash tray"],
+  ["cash", "Cash flow"],
+  ["year", "The year"]
 ];
+/* which reports the market search and event-type box apply to */
+const REPORT_FILTERED = ["takings", "events", "hours"];
 const RANGES = [
   ["30", "Last 30 days", () => [addDays(todayISO(), -29), todayISO()]],
   ["90", "Last 90 days", () => [addDays(todayISO(), -89), todayISO()]],
-  ["year", "This year", () => [todayISO().slice(0, 4) + "-01-01", todayISO()]],
+  ["ytd", "Year to date", () => [todayISO().slice(0, 4) + "-01-01", todayISO()]],
+  ["lastyear", "Last year", () => {
+    const y = +todayISO().slice(0, 4) - 1;
+    return [y + "-01-01", y + "-12-31"];
+  }],
   ["all", "All time", () => ["", ""]]
 ];
 const rangeNow = () => (RANGES.find(([, , f]) => { const [a, b] = f(); return a === RF.from && b === RF.to; }) || ["custom"])[0];
@@ -4497,7 +4657,7 @@ function reportFilters() {
         `<button data-report="${id}" aria-selected="${RF.report === id}">${label}</button>`).join("")}
     </div>
     <div class="filters">
-      ${RF.report === "takings" ? `
+      ${REPORT_FILTERED.includes(RF.report) ? `
         <span class="searchbar" style="max-width:none;min-width:200px">${ICON_SEARCH}
           <input type="text" id="fEv" list="fEvList" value="${esc(RF.ev)}" placeholder="Search markets" autocomplete="off"></span>
         <datalist id="fEvList">${evNames.map(l => `<option value="${esc(l)}"></option>`).join("")}</datalist>
@@ -4514,6 +4674,22 @@ function renderReportBody() {
   const host = $("#repBody");
   if (!host) return;
   if (RF.report === "cash") { host.innerHTML = reportCash(); bindCash(host); return; }
+  if (RF.report === "tray") {
+    host.innerHTML = reportTray();
+    host.querySelectorAll("[data-tray]").forEach(b => b.onclick = () => trayCountSheet(b.dataset.tray));
+    return;
+  }
+  if (RF.report === "events") {
+    host.innerHTML = reportEvents();
+    host.querySelectorAll("[data-evrep]").forEach(b => b.onclick = () => eventReport(b.dataset.evrep));
+    return;
+  }
+  if (RF.report === "hours") {
+    host.innerHTML = reportHours();
+    host.querySelectorAll("[data-rh]").forEach(b => b.onclick = () => { RH.avg = b.dataset.rh === "avg"; renderReportBody(); });
+    return;
+  }
+  if (RF.report === "year") { host.innerHTML = reportYear(); bindYear(); return; }
   host.innerHTML = RF.report === "written" ? reportWritten() : reportTakings();
   host.querySelectorAll("[data-wgrp]").forEach(b => b.onclick = () => {
     const x = WO_GROUPS[+b.dataset.wgrp];
@@ -4532,6 +4708,11 @@ function renderReports() {
   renderReportBody();
 
   p.querySelectorAll("[data-report]").forEach(b => b.onclick = () => {
+    /* the year opens on the year so far unless the dates have been set by hand */
+    if (b.dataset.report === "year" && RF.report !== "year" && rangeNow() !== "custom") {
+      const [a, z] = RANGES.find(r => r[0] === "ytd")[2]();
+      RF.from = a; RF.to = z;
+    }
     RF.report = b.dataset.report; renderReports();
   });
   if ($("#fEv")) $("#fEv").oninput = e => { RF.ev = e.target.value; renderReportBody(); };
@@ -4562,12 +4743,21 @@ function reportTakings() {
   const lines = sales.flatMap(s => s.lines.map(l => ({ ...l, ts: s.ts, dayId: s.dayId, c: ctxOf(s.dayId) })));
   const evs = filteredVisits();
 
-  const taken = lines.reduce((a, l) => a + l.total, 0);
+  const taken = r2(sales.reduce((a, s) => a + s.total, 0));
+  const tax = r2(sales.reduce((a, s) => a + saleTax(s), 0));
+  const payFees = r2(sales.reduce((a, s) => a + saleFee(s), 0));
   const goods = lines.reduce((a, l) => a + l.costTotal, 0);
   const fees = evs.reduce((a, v) => a + appCosts(v.ev, v.app), 0);
-  const payFees = sales.reduce((a, s) => a + saleFee(s), 0);
-  const net = taken - goods - fees - payFees;
-  const payBy = payBreakdown(sales);
+  const net = taken - tax - payFees - goods - fees;
+  const pays = {};
+  for (const x of sales) {
+    if (!(x.total > 0)) continue;
+    const k = saleHow(x);
+    pays[k] = pays[k] || { amt: 0, n: 0 };
+    pays[k].amt += x.total; pays[k].n += 1;
+  }
+  const payRows = Object.entries(pays).sort((a, b) => b[1].amt - a[1].amt);
+  const payMax = Math.max(...payRows.map(r => r[1].amt), 0.01);
   const qty = lines.reduce((a, l) => a + l.qty, 0);
   const free = lines.filter(l => l.mode === "free");
   const freeQty = free.reduce((a, l) => a + l.qty, 0);
@@ -4590,7 +4780,7 @@ function reportTakings() {
   for (const l of lines) {
     const k = l.dayId || "—";
     dayAgg[k] = dayAgg[k] || { rev: 0, qty: 0, c: l.c };
-    dayAgg[k].rev += l.total; dayAgg[k].qty += l.qty;
+    dayAgg[k].rev += lineGross(l); dayAgg[k].qty += l.qty;
   }
   const byDay = Object.entries(dayAgg).sort((a, b) => (a[1].c.date || "").localeCompare(b[1].c.date || ""));
   const dayMax = Math.max(...byDay.map(r => r[1].rev), 0.01);
@@ -4633,15 +4823,15 @@ function reportTakings() {
   return `
   <div class="kpis">
     <div class="kpi big"><div class="k">Money taken</div><div class="v">${esc(cur(taken))}</div>
-      <div class="n">${sales.length} sale${sales.length === 1 ? "" : "s"} · ${qty} things</div></div>
+      <div class="n">${sales.length} sale${sales.length === 1 ? "" : "s"} · ${qty} things${tax ? " · tax included" : ""}</div></div>
     <div class="kpi big"><div class="k">Balloons cost</div><div class="v">${esc(cur(goods))}</div>
       <div class="n">what went into them</div></div>
     <div class="kpi big"><div class="k">Stalls &amp; travel</div><div class="v">${esc(cur(fees))}</div>
       <div class="n">${evs.length} visit${evs.length === 1 ? "" : "s"}</div></div>
-    ${payFees >= 0.005 ? `<div class="kpi big"><div class="k">Payment fees</div><div class="v">${esc(cur(payFees))}</div>
-      <div class="n">kept by Venmo and the like</div></div>` : ""}
     <div class="kpi big tint"><div class="k">Money kept</div><div class="v">${esc(cur(net))}</div>
       <div class="n">${[
+        tax ? esc(cur(tax)) + " is sales tax" : "",
+        payFees ? esc(cur(payFees)) + " in card fees" : "",
         freeQty ? freeQty + " given away (" + esc(cur(freeVal)) + ")" : "",
         discVal ? esc(cur(discVal)) + " in deals" : "",
         replQty ? replQty + " swapped (" + esc(cur(replNet)) + ")" : "",
@@ -4649,9 +4839,16 @@ function reportTakings() {
       ].filter(Boolean).join(" · ") || "after everything"}</div></div>
   </div>
 
-  ${payBy.length ? `<div class="card"><div class="sect" style="margin-top:0">How people paid</div>
-    ${payRows(payBy)}
-    <p class="note" style="margin:10px 0 0">The right-hand figure is what reached you. Sales from before this was added show as Not recorded.</p></div>` : ""}
+  ${payRows.length ? `<div class="card"><div class="sect" style="margin-top:0">How people paid</div>
+    <div class="bars">${payRows.map(([k, v]) => `
+      <div class="bar">
+        <span class="l">${esc(k)}</span>
+        <span class="t"><i style="width:${Math.max(2, Math.round(v.amt / payMax * 100))}%"></i></span>
+        <span class="v">${esc(cur(v.amt))}</span>
+      </div>`).join("")}</div>
+    <p class="note" style="margin:12px 0 0">${pays["Not recorded"]
+      ? "Sales from before you started recording how people paid sit under Not recorded."
+      : "Counted at what the customer handed over, fees included."}</p></div>` : ""}
 
   ${byDay.length ? `<div class="card"><div class="sect" style="margin-top:0">Every market day</div>
     <p class="note" style="margin-top:-6px">Tap a date to see every sale on it, and to reverse one.</p>
@@ -4698,24 +4895,14 @@ function dayReport(dayId) {
   const sales = S.sales.filter(s => s.dayId === dayId).sort((a, b) => a.ts - b.ts);
   const revs = S.reversals.filter(r => r.dayId === dayId).sort((a, b) => b.ts - a.ts);
   const taken = sales.reduce((a, s) => a + s.total, 0);
-  const dayFees = sales.reduce((a, s) => a + saleFee(s), 0);
   const things = sales.reduce((a, s) => a + s.lines.reduce((b, l) => b + l.qty, 0), 0);
-  const payPick = s => {
-    const ms = payMethods();
-    const known = ms.some(m => m.id === s.pay);
-    return `<select class="paypick" data-paysale="${s.id}" aria-label="Paid by">
-      ${known ? "" : `<option value="" selected>${esc(s.pay ? salePayName(s) : "Paid by?")}</option>`}
-      ${ms.map(m => `<option value="${esc(m.id)}"${m.id === s.pay ? " selected" : ""}>${esc(m.name)}</option>`).join("")}
-    </select>`;
-  };
 
   const saleBlock = (s, n) => `<div class="grp">
     <div class="gh" style="margin-bottom:8px">
       <span style="flex:1;min-width:0"><b style="font-family:var(--display);font-size:17px">Sale ${n}</b>
-        <span class="note" style="margin:0 0 0 6px">${esc(saleTime(s.ts))}</span></span>
-      ${payPick(s)}
-      <span style="text-align:right"><b style="font-family:var(--display);font-size:18px">${esc(cur(s.total))}</b>
-        ${saleFee(s) ? `<span class="note" style="display:block;margin:0;font-size:12px">−${esc(cur(saleFee(s)))} fee</span>` : ""}</span>
+        <span class="note" style="margin:0 0 0 6px">${esc(saleTime(s.ts))}${s.pay && s.pay !== "none" ? " · " + esc(saleHow(s)) : ""}${
+          s.change ? " · " + esc(cur(s.change)) + " change" : ""}${saleTax(s) ? " · incl. " + esc(cur(saleTax(s))) + " tax" : ""}</span></span>
+      <b style="font-family:var(--display);font-size:18px">${esc(cur(s.total))}</b>
       ${s.lines.length > 1 ? `<button class="tlink" data-rev-sale="${s.id}">Reverse sale</button>` : ""}
     </div>
     ${s.lines.map((l, i) => {
@@ -4733,11 +4920,21 @@ function dayReport(dayId) {
   sheet(esc(c.event) + `<span style="display:block;font-family:var(--body);font-weight:600;font-size:15px;color:var(--ink-mute);margin-top:2px">${esc(fmtDate(c.date, true) || "No date")}</span>`, `
     <div class="kpis" style="grid-template-columns:repeat(2,1fr)">
       <div class="kpi tint"><div class="k">Taken</div><div class="v">${esc(cur(taken))}</div>
-        ${dayFees >= 0.005 ? `<div class="n">${esc(cur(taken - dayFees))} after fees</div>` : ""}</div>
+        ${payWords(c.day || { id: dayId }) ? `<div class="n">${esc(payWords(c.day || { id: dayId }))}</div>` : ""}</div>
       <div class="kpi"><div class="k">Sales</div><div class="v">${sales.length}</div>
         <div class="n">${things} thing${things === 1 ? "" : "s"}</div></div>
     </div>
-    ${sales.length ? `<div class="card">${payRows(payBreakdown(sales))}</div>` : ""}
+    ${(() => {
+      const d = c.day;
+      if (!d) return "";
+      const diff = trayDiff(d);
+      if (diff === null) return "";
+      const w = trayWords(diff);
+      return `<div class="inset" style="margin-bottom:14px">
+        <span class="b"><span class="n">Cash tray</span>
+          <span class="s">should have held ${esc(cur(+d.count.expected))} · counted ${esc(cur(+d.count.counted))}</span></span>
+        <span class="fact ${w.cls}">${esc(w.text)}</span></div>`;
+    })()}
     ${sales.length ? sales.map((s, i) => saleBlock(s, i + 1)).join("")
       : '<p class="note">No sales left on this day.</p>'}
     ${revs.length ? `<div class="slabel">Reversed</div>
@@ -4749,16 +4946,6 @@ function dayReport(dayId) {
       </div>`).join("")}` : ""}
   `, null);
 
-  document.querySelectorAll("[data-paysale]").forEach(x => x.onchange = async () => {
-    const s = S.sales.find(y => y.id === x.dataset.paysale);
-    const m = payOf(x.value);
-    if (!s || !m) return;
-    stampPay(s, m);
-    await salePut(s);
-    renderSession(); if (S.tab === "reports") renderReports();
-    dayReport(dayId);
-    toast("Sale marked " + m.name);
-  });
   document.querySelectorAll("[data-rev-sale]").forEach(b => b.onclick = () => {
     const s = S.sales.find(x => x.id === b.dataset.revSale);
     if (s) reverseAsk(s, null);
@@ -4791,7 +4978,7 @@ function splitLine(l, k) {
   const drawnQty = ds => (ds || []).reduce((a, d) => a + d.qty, 0);
   const part = Object.assign({}, l, {
     qty: k, total: m4(l.total * ratio), listed: m4(l.listed * ratio),
-    costTotal: m4(l.costTotal * ratio), short: r3((+l.short || 0) * ratio),
+    costTotal: m4(l.costTotal * ratio), short: r3((+l.short || 0) * ratio), tax: m4(lineTax(l) * ratio),
     draw: takeDraws(l.draw || [], drawnQty(l.draw) * ratio),
     used: (l.used || []).map(u => {
       const p = Object.assign({}, u, {
@@ -4804,6 +4991,7 @@ function splitLine(l, k) {
   });
   l.qty = r3(l.qty - k); l.total = m4(l.total - part.total); l.listed = m4(l.listed - part.listed);
   l.costTotal = m4(l.costTotal - part.costTotal); l.short = r3((+l.short || 0) - part.short);
+  if (l.tax !== undefined) l.tax = m4(lineTax(l) - part.tax);
   return part;
 }
 
@@ -4822,7 +5010,7 @@ function reverseAsk(sale, lineIdx) {
   const whole = one && Number.isInteger(one.line.qty) && one.line.qty > 1;
 
   const draw = () => {
-    const amt = rows.reduce((a, r) => a + r.line.total * (r.k / r.line.qty), 0);
+    const amt = rows.reduce((a, r) => a + lineGross(r.line) * (r.k / r.line.qty), 0);
     host.innerHTML = `<div class="scrim confirm">
       <div class="sheet narrow" role="alertdialog" aria-modal="true" style="max-width:520px">
         <div class="shead"><h3>${one ? "Reverse " + esc(one.line.name) : "Reverse this sale"}</h3></div>
@@ -4922,18 +5110,21 @@ async function doReverse(sale, rows) {
       if (r.mode === "waste") { wasteRaw(part, r.reason || "Reversed sale", sale.dayId, date); wasted += part.qty; }
       else { returnStock(lineDraws(part)); back = true; }
     }
-    rec.total += part.total;
+    rec.total += lineGross(part);
     rec.lines.unshift({ name: part.name, variant: vKey(part.opts), qty: part.qty, cost: part.costTotal,
-      amount: part.total, disposition: lineDrewStock(part) ? r.mode : "stock", reason: r.reason || "" });
+      amount: lineGross(part), tax: lineTax(part), disposition: lineDrewStock(part) ? r.mode : "stock", reason: r.reason || "" });
   }
   rec.total = m4(rec.total);
+  rec.pay = sale.pay || ""; rec.payName = sale.pay ? saleHow(sale) : "";
   S.reversals.push(rec);
 
   if (sale.lines.length) {
-    sale.total = m4(sale.lines.reduce((a, l) => a + l.total, 0));
+    sale.total = m4(sale.lines.reduce((a, l) => a + lineGross(l), 0));
+    sale.tax = m4(sale.lines.reduce((a, l) => a + lineTax(l), 0));
+    if (sale.pay) sale.fee = sale.total > 0 ? feeFor(sale.pay, sale.total) : 0;
+    if (sale.tendered !== undefined) { delete sale.tendered; delete sale.change; }
     sale.cost = m4(sale.lines.reduce((a, l) => a + l.costTotal, 0));
-    sale.profit = m4(sale.total - sale.cost);
-    if (sale.pay) sale.fee = feeFor({ pct: sale.payPct, fixed: sale.payFixed }, sale.total);
+    sale.profit = m4(sale.total - saleTax(sale) - saleFee(sale) - sale.cost);
     await salePut(sale);
   } else {
     await saleDel(sale.id);
@@ -5049,7 +5240,8 @@ function backupJson(slot) {
     orders: S.orders, assets: S.assets, cash: S.cash,
     events: S.events, days: S.days,
     settings, sales: S.sales,
-    lots: S.lots, writeoffs: S.writeoffs, reversals: S.reversals
+    lots: S.lots, writeoffs: S.writeoffs, reversals: S.reversals,
+    receipts: S.settings.backupPhotos ? S.receipts : undefined
   }, null, 1);
 }
 function unbacked() {
@@ -5143,6 +5335,21 @@ function renderData() {
       </div>
 
       <div class="card" style="border-radius:28px">
+        <div class="sect" style="margin-top:0">Receipts</div>
+        <p class="note">${(() => {
+          const n = receiptsList().length;
+          return n ? n + " receipt" + (n === 1 ? "" : "s") + " photographed. Save them as one page you can print or file."
+            : "Photograph a receipt when you record an expense, a stall fee or stock arriving, and it's kept with that entry.";
+        })()}</p>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:6px">
+          <button class="btn sec sm auto" id="expRcpt">Save the receipts</button>
+          <button class="tog sm" id="bkPhotos" aria-pressed="${!!S.settings.backupPhotos}">Put them in backups too</button>
+        </div>
+        <p class="note">Backups stay small without them. With this on, every backup carries the photos — safer, but a
+          much bigger file to email.</p>
+      </div>
+
+      <div class="card" style="border-radius:28px">
         <div class="sect" style="margin-top:0">Spreadsheets</div>
         <p class="note">One row per sale — handy when a grown-up wants to check the sums.</p>
         <div style="display:flex;gap:10px;flex-wrap:wrap">
@@ -5184,6 +5391,12 @@ function renderData() {
     });
   });
   $("#expJson").onclick = doBackup;
+  $("#expRcpt").onclick = exportReceipts;
+  $("#bkPhotos").onclick = async () => {
+    S.settings.backupPhotos = !S.settings.backupPhotos;
+    await saveSettings(); renderData();
+    toast(S.settings.backupPhotos ? "Backups will carry the photos" : "Backups stay small");
+  };
   bindExports();
 
   $("#impJson").onclick = () => $("#impFile").click();
@@ -5206,6 +5419,8 @@ function renderData() {
       S.lots = d.lots || [];
       S.writeoffs = d.writeoffs || [];
       S.reversals = d.reversals || [];
+      /* a lean backup carries no photos — keep the ones already here rather than wiping them */
+      if (d.receipts) { S.receipts = d.receipts; await saveReceipts(); }
       S.settings = Object.assign(S.settings, d.settings || {});
       if (d.events || d.days) { S.events = d.events || []; S.days = d.days || []; }
       else {
@@ -5244,6 +5459,7 @@ function renderData() {
           S.items = []; S.materials = []; S.categories = []; S.productTypes = []; S.events = []; S.days = [];
           S.sales = []; setCart([]); S.lots = []; S.writeoffs = []; S.reversals = []; S.trash = []; S.orders = []; S.assets = []; S.cash = [];
           S.tickets = []; S.activeTicket = null; await saveTickets();
+          S.receipts = {}; await saveReceipts();
           S.settings.activeDay = null;
           await saveItems(); await saveMaterials(); await saveCategories(); await saveProductTypes(); await saveEvents();
           await saveDays(); await saveSettings();
@@ -5261,17 +5477,19 @@ function bindExports() {
     const q = v => '"' + String(v == null ? "" : v).replace(/"/g, '""') + '"';
     const head = ["sale_id", "date", "time", "hour", "event", "event_type", "item", "options", "qty",
       "list_price", "unit_price", "unit_cost", "price_mode", "discount_type", "discount_value",
-      "reason", "line_total", "line_cost", "line_margin", "units_unstocked", "paid_by", "sale_fee"];
+      "reason", "line_total", "line_cost", "line_margin", "units_unstocked",
+      "paid_by", "line_tax", "line_gross", "sale_total", "sale_tax", "sale_fee", "cash_given", "change_given", "one_off", "note"];
     const rows = [head.join(",")];
     for (const s of S.sales) {
       const c = ctxOf(s.dayId), d = new Date(s.ts);
-      /* the fee belongs to the whole sale, so it sits on its first line only — summing the column stays right */
-      s.lines.forEach((l, li) => rows.push([s.id, c.date, d.toTimeString().slice(0, 5), d.getHours(), c.event, c.type,
+      for (const l of s.lines) rows.push([s.id, c.date, d.toTimeString().slice(0, 5), d.getHours(), c.event, c.type,
         l.name, l.opts.map(o => o.g + ": " + o.o).join(" | "), l.qty, l.base, l.unit, l.cost, l.mode,
         l.mode === "discount" ? l.dType : (l.mode === "set" ? "set" : (l.mode === "replace" ? "replacement fee" : "")),
         (l.mode === "discount" || l.mode === "set" || l.mode === "replace") ? l.dVal : "", l.reason,
         l.total, l.costTotal, l.total - l.costTotal, l.short || 0,
-        salePayName(s), li === 0 ? saleFee(s) : ""].map(q).join(",")));
+        s.pay ? saleHow(s) : "", lineTax(l) || 0, r2(lineGross(l)), s.total, saleTax(s), saleFee(s),
+        s.tendered == null ? "" : s.tendered, s.change == null ? "" : s.change,
+        l.custom ? "yes" : "", l.note || ""].map(q).join(","));
     }
     saveOut("stallbook-sales-" + todayISO() + ".csv", rows.join("\n"), "text/csv");
   };
@@ -5373,7 +5591,7 @@ const CASH_KINDS = {
 };
 /* [name, shown in / out] — the order lines appear in the statement */
 const CASH_GROUP = {
-  owner_in: ["Money put in", 1], sales: ["Takings", 1], payfee: ["Payment fees", -1], stock: ["Stock bought", -1],
+  owner_in: ["Money put in", 1], sales: ["Takings", 1], fees: ["Card and app fees", -1], tray: ["Tray over and short", 1], stock: ["Stock bought", -1],
   gear: ["Equipment", -1], stall: ["Stall fees and travel", -1], expense: ["Other expenses", -1],
   owner_out: ["Paid to owners", -1]
 };
@@ -5391,13 +5609,21 @@ function cashMoves() {
     const c = ctxOf(s.dayId);
     const date = c.date || isoOf(new Date(s.ts));
     const k = (s.dayId || "") + "|" + date;
-    byDay[k] = byDay[k] || { date, amount: 0, fee: 0, event: c.event };
+    byDay[k] = byDay[k] || { date, amount: 0, fees: 0, event: c.event };
     byDay[k].amount += +s.total || 0;
-    byDay[k].fee += saleFee(s);
+    byDay[k].fees += saleFee(s);
   }
   for (const d of Object.values(byDay)) {
-    if (d.amount) out.push({ date: d.date, amount: d.amount, group: "sales", label: "Takings · " + d.event });
-    if (d.fee >= 0.005) out.push({ date: d.date, amount: -c2(d.fee), group: "payfee", label: "Payment fees · " + d.event });
+    if (d.amount) out.push({ date: d.date, amount: r2(d.amount), group: "sales", label: "Takings · " + d.event });
+    if (d.fees) out.push({ date: d.date, amount: -r2(d.fees), group: "fees", label: "Card and app fees · " + d.event });
+  }
+  /* what the tray was over or short, once it's been counted */
+  for (const d of S.days) {
+    const diff = trayDiff(d);
+    if (diff === null || Math.abs(diff) < 0.005) continue;
+    const ev = evOf(d.eventId);
+    out.push({ date: d.date, amount: diff, group: "tray",
+      label: (diff > 0 ? "Tray over · " : "Tray short · ") + ((ev && ev.name) || "Market") });
   }
   for (const l of S.lots) {
     const m = matById(lotRef(l));
@@ -5409,6 +5635,9 @@ function cashMoves() {
   for (const a of S.assets) {
     const cost = assetTotal(a);
     if (!cost) continue;
+    for (const u of (a.upkeep || [])) if (+u.cost > 0)
+      out.push({ date: u.date || a.bought || todayISO(), amount: -(+u.cost || 0), group: "expense",
+        label: "Repair · " + (a.name || "equipment") + (u.what ? " · " + u.what : "") });
     out.push({ date: a.bought || isoOf(new Date(a.created || Date.now())), amount: -cost, group: "gear",
       label: "Equipment · " + a.name + ((+a.qty || 1) > 1 ? " × " + a.qty : "") });
   }
@@ -5430,7 +5659,7 @@ function reportCash() {
   const inR = moves.filter(m => inRange(m.date));
   const close = before + inR.reduce((a, m) => a + m.amount, 0);
   const sum = g => inR.filter(m => m.group === g).reduce((a, m) => a + m.amount, 0);
-  const trading = ["sales", "payfee", "stock", "gear", "stall", "expense"].reduce((a, g) => a + sum(g), 0);
+  const trading = ["sales", "fees", "tray", "stock", "gear", "stall", "expense"].reduce((a, g) => a + sum(g), 0);
   const paid = -sum("owner_out"), putIn = sum("owner_in");
   const hasStart = S.cash.some(c => c.kind === "start");
 
@@ -5464,7 +5693,7 @@ function reportCash() {
         <div class="n">${hasStart ? "everything up to today" : "no starting cash set yet"}</div></div>
       <div class="kpi"><div class="k">Paid to owners</div><div class="v">${esc(cur(paid))}</div><div class="n">in these dates</div></div>
       <div class="kpi"><div class="k">Money put in</div><div class="v">${esc(cur(putIn))}</div><div class="n">in these dates</div></div>
-      <div class="kpi ${trading < 0 ? "warn" : ""}"><div class="k">From trading</div><div class="v">${trading < 0 ? "−" : ""}${esc(cur(Math.abs(trading)))}</div>
+      <div class="kpi ${trading < 0 ? "warn" : ""}"><div class="k">From sales</div><div class="v">${trading < 0 ? "−" : ""}${esc(cur(Math.abs(trading)))}</div>
         <div class="n">takings less everything spent</div></div>
     </div>
     ${now < 0 ? `<p class="note" style="color:var(--warn-ink)">More has gone out than the app knows came in. Usually that means the starting cash, or money you put in, hasn't been entered yet.</p>` : ""}
@@ -5490,8 +5719,56 @@ function reportCash() {
         <span class="r" style="font-size:15px;color:var(--ink-mute)">${m.bal < 0 ? "−" : ""}${esc(cur(Math.abs(m.bal)))}</span>
       </${m.entry ? "button" : "div"}>`).join("")}</div>
       ${ledger.length > 25 ? `<button class="btn ghost" id="cashAll">${S.cashAll ? "Just the latest 25" : "Show all " + ledger.length}</button>` : ""}
-      <p class="note" style="margin-top:12px">The right-hand figure is what was left after each one. Tap anything you entered yourself to change it. Takings are what customers paid; what Venmo and the like kept comes off as Payment fees.</p>`
+      <p class="note" style="margin-top:12px">The right-hand figure is what was left after each one. Tap anything you entered yourself to change it. Takings are what customers handed over,
+      sales tax and all; card fees come off on their own line.</p>`
       : '<p class="note">Nothing in these dates.</p>'}`;
+}
+
+/* -------- was the tray right? -------- */
+function reportTray() {
+  const days = S.days
+    .filter(d => inRange(d.date) && daysUntil(d.date) <= 0)
+    .filter(d => salesOfDay(d.id).length || d.float != null || d.count)
+    .sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+
+  if (!days.length) return `<p class="note">No market days with a tray in these dates. The float is set when you open a
+    day, and the count happens as you close up.</p>`;
+
+  const counted = days.filter(d => d.count);
+  const net = r2(counted.reduce((a, d) => a + trayDiff(d), 0));
+  const worst = counted.slice().sort((a, b) => trayDiff(a) - trayDiff(b))[0];
+  const worstDiff = worst ? trayDiff(worst) : 0;
+
+  const row = d => {
+    const ev = evOf(d.eventId) || {};
+    const tr = trayNow(d);
+    const diff = trayDiff(d);
+    const w = trayWords(diff);
+    const bits = [d.float == null ? "no float set" : "float " + cur(tr.float),
+      "should be " + cur(d.count ? +d.count.expected : tr.expected),
+      d.count ? "counted " + cur(+d.count.counted) : ""].filter(Boolean);
+    return `<button class="inset" data-tray="${esc(d.id)}" style="width:100%;text-align:left">
+      <span class="b"><span class="n">${esc(ev.name || "Untitled event")}</span>
+        <span class="s">${esc(fmtDate(d.date, true))} · ${esc(bits.join(" · "))}</span></span>
+      <span class="fact ${w.cls}">${esc(w.text)}</span></button>`;
+  };
+
+  return `
+    <div class="kpis">
+      <div class="kpi big ${Math.abs(net) < 0.005 ? "" : (net < 0 ? "warn" : "")}"><div class="k">Over or short</div>
+        <div class="v">${net < 0 ? "−" : ""}${esc(cur(Math.abs(net)))}</div>
+        <div class="n">${counted.length} day${counted.length === 1 ? "" : "s"} counted</div></div>
+      <div class="kpi"><div class="k">Not counted</div><div class="v">${days.length - counted.length}</div>
+        <div class="n">of ${days.length} market day${days.length === 1 ? "" : "s"}</div></div>
+      ${worst && worstDiff < -0.005 ? `<div class="kpi"><div class="k">Worst day</div>
+        <div class="v sm">${esc(cur(-worstDiff))} short</div>
+        <div class="n">${esc(fmtDate(worst.date, true))}</div></div>` : ""}
+    </div>
+    <div class="card"><div class="sect" style="margin-top:0">Every market day</div>
+      <p class="note" style="margin-top:-6px">Tap a day to count it again or fix the float.</p>
+      ${days.map(row).join("")}</div>
+    <p class="note">A few cents either way is normal. The same shortfall turning up again and again usually means change
+      given wrong, or something paid for out of the tray without being written down.</p>`;
 }
 
 function bindCash(host) {
@@ -5545,9 +5822,11 @@ function cashSheet(existing, kind) {
       ${owner() ? `<label class="f"><span class="t">${c.kind === "out" ? "Paid to" : "From"}</span>
         <input type="text" id="cWho" list="cWhoList" value="${esc(c.who)}" placeholder="Naomi" autocomplete="off">
         <datalist id="cWhoList">${cashWho().map(w => `<option value="${esc(w)}"></option>`).join("")}</datalist></label>` : ""}
-      <label class="f" style="margin-bottom:0"><span class="t">Note</span>
-        <input type="text" id="cNote" value="${esc(c.note)}" placeholder="${c.kind === "expense" ? "Public liability insurance" : (c.kind === "out" ? "Spring markets" : "Float for the till")}"></label>`;
+      <label class="f"><span class="t">Note</span>
+        <input type="text" id="cNote" value="${esc(c.note)}" placeholder="${c.kind === "expense" ? "Public liability insurance" : (c.kind === "out" ? "Spring markets" : "Float for the till")}"></label>
+      ${receiptBlock(c.receipt)}`;
     document.querySelectorAll("[data-ck]").forEach(b => b.onclick = () => { read(); c.kind = b.dataset.ck; draw(); });
+    bindReceipt(() => c.receipt || "", v => { read(); c.receipt = v || ""; }, draw);
   };
   draw();
 
@@ -5720,6 +5999,7 @@ function assetTypeSheet() {
 }
 
 function assetSheet(existing) {
+  const upRcpt = { id: "" };
   const a = existing ? JSON.parse(JSON.stringify(existing)) : {
     id: uid(), name: "", type: assetTypes()[0] || "", qty: 1, cost: "", bought: todayISO(),
     from: "", condition: "good", retired: false, photo: "", note: "", created: Date.now()
@@ -5742,6 +6022,8 @@ function assetSheet(existing) {
     a.from = $("#gFrom").value;
     a.note = $("#gNote").value;
   };
+  const upWork = () => ({ what: $("#gUpWhat") ? $("#gUpWhat").value.trim() : "",
+    cost: $("#gUpCost") ? $("#gUpCost").value : "", date: $("#gUpDate") ? $("#gUpDate").value : todayISO() });
 
   const draw = () => {
     $("#gearBody").innerHTML = `
@@ -5750,12 +6032,7 @@ function assetSheet(existing) {
           <input type="text" id="gName" value="${esc(a.name)}" placeholder="6 ft folding table"></label>
         <label class="f"><span class="t">Type</span><span id="gTypeBox"></span></label>
       </div>
-      <label class="f"><span class="t">Photo</span>
-        <div class="rowf" style="align-items:center">
-          <span class="av" id="gPrev" style="flex:0 0 64px;min-width:0;${a.photo ? `background-image:url('${a.photo}')` : ""}"></span>
-          <input type="file" id="gFile" accept="image/*" style="flex:1;border:0;padding:0;background:none">
-          <button class="xbtn" id="gClearPhoto" aria-label="Remove photo" style="flex:0 0 44px;min-width:0">✕</button>
-        </div></label>
+      ${photoField(a, "g")}
       <div class="rowf">
         <label class="f"><span class="t">How many</span>
           <input type="number" id="gQty" inputmode="numeric" step="1" min="1" value="${esc(a.qty || 1)}"></label>
@@ -5767,12 +6044,34 @@ function assetSheet(existing) {
       <p class="note" id="gTotal" style="margin:-4px 0 14px"></p>
       <label class="f"><span class="t">Where from</span>
         <input type="text" id="gFrom" value="${esc(a.from)}" placeholder="Walmart, Amazon, handmade"></label>
+      <div id="gRcpt">${receiptBlock(a.receipt)}</div>
       <span class="t" style="display:block;font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-mute);margin-bottom:6px">Condition</span>
       <div class="togs" style="margin-bottom:14px">
         ${CONDITIONS.map(([k, l]) => `<button class="tog sm" data-cond="${k}" aria-pressed="${a.condition === k}">${l}</button>`).join("")}
       </div>
       <label class="f"><span class="t">Note</span>
         <textarea id="gNote" placeholder="Leg wobbles — pack the shim">${esc(a.note)}</textarea></label>
+
+      <div class="sect">Repairs and changes</div>
+      <p class="note">Anything spent on it after buying it — a new cover, a welded joint, a paint job. It counts as a
+        running cost, not as buying kit again.</p>
+      ${(a.upkeep || []).length ? `<div class="card" style="padding:12px 14px;margin-bottom:12px">
+        ${a.upkeep.map(u => `<div class="inset">
+          <span class="b"><span class="n">${esc(u.what || "Work done")}</span>
+            <span class="s">${esc(fmtDate(u.date, true))}${receiptOf(u.receipt) ? " · receipt kept" : ""}</span></span>
+          <span class="r">${esc(cur(+u.cost || 0))}</span>
+          ${receiptOf(u.receipt) ? `<button class="tlink" data-useerc="${esc(u.id)}">See it</button>` : ""}
+          <button class="xbtn" data-upx="${esc(u.id)}" aria-label="Remove">✕</button></div>`).join("")}
+      </div>` : ""}
+      <div class="rowf">
+        <label class="f"><span class="t">What was done</span>
+          <input type="text" id="gUpWhat" placeholder="New gazebo leg" autocomplete="off"></label>
+        <label class="f"><span class="t">Cost</span>
+          <input type="number" id="gUpCost" inputmode="decimal" step="0.01" min="0" placeholder="25.00"></label>
+        <label class="f"><span class="t">When</span><input type="date" id="gUpDate" value="${todayISO()}"></label>
+      </div>
+      <div id="gUpRcpt">${receiptBlock(upRcpt.id)}</div>
+      <button class="btn sec sm" id="gUpAdd" style="margin-bottom:6px">Add it</button>
       <span class="t" style="display:block;font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-mute);margin-bottom:6px">Still using it?</span>
       <div class="togs even" style="max-width:300px">
         <button class="tog sm" id="gOn" aria-pressed="${!a.retired}">In use</button>
@@ -5813,12 +6112,37 @@ function assetSheet(existing) {
     $("#gQty").oninput = showTotal;
     $("#gCost").oninput = showTotal;
     showTotal();
-    $("#gClearPhoto").onclick = () => { a.photo = ""; $("#gPrev").style.backgroundImage = ""; };
-    $("#gFile").onchange = async e => {
-      const f = e.target.files[0]; if (!f) return;
-      a.photo = await shrink(f);
-      $("#gPrev").style.backgroundImage = `url('${a.photo}')`;
+    wirePhoto(a, "g");
+    bindReceipt(() => a.receipt || "", v => { read(); a.receipt = v || ""; }, draw);
+    if ($("#gUpRcpt")) {
+      const box = $("#gUpRcpt");
+      const rebind = () => {
+        const w = upWork();
+        box.innerHTML = receiptBlock(upRcpt.id);
+        bindReceiptIn(box, () => upRcpt.id, v => { upRcpt.id = v; }, rebind);
+        if ($("#gUpWhat")) { $("#gUpWhat").value = w.what; $("#gUpCost").value = w.cost; $("#gUpDate").value = w.date; }
+      };
+      rebind();
+    }
+    if ($("#gUpAdd")) $("#gUpAdd").onclick = async () => {
+      const w = upWork();
+      if (!w.what && !(+w.cost > 0)) { toast("What was done?"); return; }
+      read();
+      a.upkeep = (a.upkeep || []).concat([{ id: uid(), what: w.what || "Work done",
+        cost: Math.max(0, +w.cost || 0), date: w.date || todayISO(), receipt: upRcpt.id }]);
+      upRcpt.id = "";
+      draw();
+      toast("Added to its history");
     };
+    document.querySelectorAll("[data-upx]").forEach(b => b.onclick = () => {
+      read();
+      a.upkeep = (a.upkeep || []).filter(u => u.id !== b.dataset.upx);
+      draw();
+    });
+    document.querySelectorAll("[data-useerc]").forEach(b => b.onclick = () => {
+      const u = (a.upkeep || []).find(x => x.id === b.dataset.useerc);
+      if (u) receiptViewer(u.receipt);
+    });
     document.querySelectorAll("[data-cond]").forEach(b => b.onclick = () => { read(); a.condition = b.dataset.cond; draw(); });
     $("#gOn").onclick = () => { read(); a.retired = false; draw(); };
     $("#gOff").onclick = () => { read(); a.retired = true; draw(); };
@@ -5911,3 +6235,1685 @@ function toast(msg, actionLabel, action) {
   toastTimer = setTimeout(() => t.remove(), actionLabel ? 6000 : 2200);
 }
 document.addEventListener("keydown", e => { if (e.key === "Escape") closeSheet(); });
+
+/* ============================================================
+   Paying, tax, the cash tray and being offline
+   ============================================================ */
+
+const pctWords = r => (Math.round((+r || 0) * 1000) / 1000) + "%";
+
+/* -------- change: what they handed over, what goes back -------- */
+/* What someone is likely to hand over: the next round figure up, then notes.
+   Nobody pays for a $6 dog with $7, so whole totals skip the next dollar. */
+function tenderOptions(total) {
+  const up = step => Math.ceil((total + 0.004) / step) * step;
+  const whole = Math.abs(total - Math.round(total)) < 0.005;
+  const raw = (whole ? [] : [up(1)]).concat([up(5), up(10), 20, 50, 100]);
+  const seen = [];
+  for (const v of raw) {
+    const r = r2(v);
+    if (r > total + 0.004 && !seen.includes(r)) seen.push(r);
+  }
+  return seen.sort((a, b) => a - b).slice(0, 5);
+}
+/* the change in notes and coins, biggest first — quicker than doing it in your head */
+const CHANGE_UNITS = [[20, "$20"], [10, "$10"], [5, "$5"], [1, "$1"],
+  [0.25, "quarter", "quarters"], [0.1, "dime", "dimes"], [0.05, "nickel", "nickels"], [0.01, "penny", "pennies"]];
+function changeWords(amount) {
+  let left = Math.round(amount * 100);
+  const bits = [];
+  for (const [v, one, many] of CHANGE_UNITS) {
+    const c = Math.floor(left / Math.round(v * 100));
+    if (c > 0) { bits.push(c + " × " + (c === 1 || !many ? one : many)); left -= c * Math.round(v * 100); }
+  }
+  return bits.join(" · ");
+}
+
+function changeSheet() {
+  const t = ticketOf(S.activeTicket) || ensureTicket();
+  const total = r2(ticketTotal(t));
+  let tender = null;
+
+  sheet("Cash", `
+    <div class="duebox"><span class="k">To pay</span><span class="v">${esc(cur(total))}</span></div>
+    <div class="slabel">What they handed you</div>
+    <div class="tender">
+      <button class="tnd" data-tnd="exact">Exact money</button>
+      ${tenderOptions(total).map(v => `<button class="tnd" data-tnd="${v}">${esc(cur(v))}</button>`).join("")}
+    </div>
+    <label class="f" style="margin-top:14px"><span class="t">Or type what they gave you</span>
+      <input type="number" id="tnOwn" inputmode="decimal" step="0.01" min="0" placeholder="${total.toFixed(2)}"></label>
+    <div id="tnRes"></div>
+  `, [
+    { label: "Sold", cls: "btn", id: "tnGo" },
+    { label: "Skip the change", cls: "btn sec", id: "tnSkip" }
+  ], { narrow: true });
+
+  const paint = () => {
+    const res = $("#tnRes"), go = $("#tnGo");
+    all("[data-tnd]").forEach(b => b.setAttribute("aria-pressed",
+      String(tender !== null && (b.dataset.tnd === "exact" ? tender === total : r2(+b.dataset.tnd) === tender))));
+    if (tender === null) {
+      res.innerHTML = `<p class="note" style="margin:14px 0 0">Tap what they handed you and the change works itself out.</p>`;
+      go.textContent = "Sold";
+      return;
+    }
+    const diff = r2(tender - total);
+    if (diff < -0.004) {
+      res.innerHTML = `<div class="changebox short"><span class="k">Still to come</span>
+        <span class="v">${esc(cur(-diff))}</span></div>`;
+      go.textContent = "Sold anyway";
+    } else if (diff < 0.005) {
+      res.innerHTML = `<div class="changebox"><span class="k">Change</span><span class="v">None — exact money</span></div>`;
+      go.textContent = "Sold";
+    } else {
+      res.innerHTML = `<div class="changebox"><span class="k">Give back</span><span class="v">${esc(cur(diff))}</span>
+        <span class="n">${esc(changeWords(diff))}</span></div>`;
+      go.textContent = "Sold · " + cur(diff) + " change";
+    }
+  };
+  paint();
+
+  all("[data-tnd]").forEach(b => b.onclick = () => {
+    tender = b.dataset.tnd === "exact" ? total : r2(+b.dataset.tnd);
+    $("#tnOwn").value = tender.toFixed(2);
+    paint();
+  });
+  $("#tnOwn").oninput = () => {
+    const v = $("#tnOwn").value;
+    tender = v === "" ? null : r2(+v || 0);
+    paint();
+  };
+  $("#tnGo").onclick = () => { closeSheet(); completeOrder("cash", tender === null ? null : { tendered: tender }); };
+  $("#tnSkip").onclick = () => { closeSheet(); completeOrder("cash"); };
+}
+
+/* -------- anything other than cash or card -------- */
+function otherPaySheet() {
+  const others = payOthers();
+  sheet("How did they pay?", `
+    ${others.length ? `<div class="togs even" style="margin-bottom:16px">
+        ${others.map(m => `<button class="tog" data-pm="${esc(m.id)}">${esc(m.name)}</button>`).join("")}
+      </div>`
+      : `<p class="note">Nothing else set up yet. Add the other ways people pay you — Zelle, Cash App, whatever it is.</p>`}
+    <div class="slabel">Add a way to pay</div>
+    <label class="f" style="margin-bottom:10px"><span class="t">Call it</span>
+      <input type="text" id="pmName" placeholder="Venmo" autocomplete="off"></label>
+    <p class="note">You can set what it charges you later, under Paying &amp; tax in Vendor view.</p>
+  `, [{ label: "Add it and use it", cls: "btn", id: "pmAdd" }], { narrow: true });
+
+  all("[data-pm]").forEach(b => b.onclick = () => { closeSheet(); completeOrder(b.dataset.pm); });
+  $("#pmAdd").onclick = async () => {
+    const name = $("#pmName").value.trim();
+    if (!name) { toast("Give it a name first"); return; }
+    const m = { id: uid(), name, pct: 0, fixed: 0 };
+    S.settings.payMethods = payMethods().concat([m]);
+    await saveSettings();
+    closeSheet(); completeOrder(m.id);
+  };
+}
+
+/* -------- something that isn't on the shelf -------- */
+const customNames = () => [...new Set(S.sales.flatMap(s => s.lines || [])
+  .filter(l => l.custom && l.name).map(l => l.name))].sort().slice(0, 20);
+
+function customSheet(existing) {
+  if (!requireDay()) return;
+  const st = existing
+    ? { price: existing.base, name: existing.name, qty: existing.qty,
+        uses: (existing.uses || []).map(u => ({ id: u.id, qty: u.qty })),
+        note: existing.note || "", taxFree: !!existing.taxFree }
+    : { price: "", name: "", qty: 1, uses: [], note: "", taxFree: false };
+
+  sheet("Something else", `
+    <label class="f"><span class="t">Price each</span>
+      <input type="number" id="cuPrice" inputmode="decimal" step="0.01" min="0" value="${esc(st.price)}" placeholder="5.00"></label>
+    <label class="f"><span class="t">What is it?</span>
+      <input type="text" id="cuName" list="cuNames" value="${esc(st.name)}" placeholder="Custom" autocomplete="off">
+      <datalist id="cuNames">${customNames().map(n => `<option value="${esc(n)}"></option>`).join("")}</datalist></label>
+    <div class="slabel">How many?</div>
+    <div class="qtyrow" style="margin-bottom:14px">
+      <button class="step" id="cuM" aria-label="Fewer">−</button>
+      <span class="qtyn" id="cuN">${st.qty}</span>
+      <button class="step" id="cuP" aria-label="More">+</button>
+    </div>
+    <label class="f"><span class="t">Note</span>
+      <input type="text" id="cuNote" value="${esc(st.note)}" placeholder="Giant heart for a party"></label>
+    <div class="sect">What it used</div>
+    <div id="cuUses"></div>
+    ${taxSet().on ? `<div class="togs"><button class="tog sm" id="cuTax" aria-pressed="${!st.taxFree}">Charge sales tax on it</button></div>` : ""}
+    <p class="note" style="margin-top:14px">Whatever you pick comes out of inventory when the sale goes through, so
+      the cost and the shelf counts stay right. Leave it empty and it's just a price with nothing behind it.</p>
+  `, [{ label: existing ? "Save it" : "Add it", cls: "btn", id: "cuGo" }],
+    { narrow: true, foot: true,
+      extra: existing ? [{ label: "Take it off", cls: "btn sec", id: "cuDel" }] : null });
+
+  const read = () => {
+    st.price = $("#cuPrice").value === "" ? "" : Math.max(0, +$("#cuPrice").value || 0);
+    st.name = $("#cuName").value.trim();
+    st.note = $("#cuNote").value.trim();
+  };
+  const usedCost = () => r2(st.uses.reduce((a, u) => a + (+u.qty || 0) * lastCost(u.id), 0));
+  const drawUses = () => {
+    const pickable = S.materials.filter(isLive).sort((a, b) =>
+      (a.category || "").localeCompare(b.category || "") || (a.name || "").localeCompare(b.name || ""));
+    const left = pickable.filter(m => !st.uses.some(u => u.id === m.id));
+    $("#cuUses").innerHTML = `
+      ${st.uses.length ? `<div class="card" style="padding:12px 14px;margin-bottom:10px">
+        ${st.uses.map(u => {
+          const m = matById(u.id) || { name: "Gone from inventory", unit: "" };
+          const have = Math.floor(onHandTotal(u.id));
+          const need = (+u.qty || 0) * st.qty;
+          return `<div class="inset">
+            <span class="b"><span class="n">${esc(m.name)}</span>
+              <span class="s">${have} on the shelf${need > have ? " · short by " + (need - have) : ""}${
+                lastCost(u.id) ? " · " + esc(cur(lastCost(u.id))) + " each" : ""}</span></span>
+            <input type="number" inputmode="decimal" step="${qtyStep(m.unit)}" min="0" data-uq="${esc(u.id)}"
+              value="${esc(u.qty)}" aria-label="How many ${esc(m.name)}" style="max-width:84px;text-align:right">
+            <button class="xbtn" data-ux="${esc(u.id)}" aria-label="Take ${esc(m.name)} off">✕</button></div>`;
+        }).join("")}
+      </div>` : ""}
+      ${left.length ? (() => {
+        /* type first, then the exact one — the same way inventory is laid out,
+           and short enough to find by thumb with a customer waiting */
+        const cats = [...new Set(left.map(m => m.category || "Other"))].sort();
+        const cat = cats.includes(st.pickCat) ? st.pickCat : "";
+        const inCat = cat ? left.filter(m => (m.category || "Other") === cat) : [];
+        return `<div class="rowf" style="align-items:flex-end">
+          <label class="f" style="margin-bottom:0"><span class="t">Add from inventory</span>
+            <select id="cuCat"><option value="">Type…</option>
+              ${cats.map(c => `<option value="${esc(c)}"${c === cat ? " selected" : ""}>${esc(c)}</option>`).join("")}
+            </select></label>
+          <label class="f" style="margin-bottom:0"><span class="t">Which one</span>
+            <select id="cuPick"${cat ? "" : " disabled"}>
+              <option value="">${cat ? "Pick one…" : "Type first"}</option>
+              ${inCat.map(m => {
+                const have = Math.floor(onHandTotal(m.id));
+                return `<option value="${esc(m.id)}">${esc(m.name)}${have ? " · " + have + " left" : " · none left"}</option>`;
+              }).join("")}
+            </select></label>
+        </div>`;
+      })() : `<p class="note">Everything in inventory is already on the list.</p>`}
+      ${st.uses.length ? `<p class="note" style="margin-top:10px">Costs about ${esc(cur(usedCost() * st.qty))}
+        at what you last paid${st.qty > 1 ? " for all " + st.qty : ""}.</p>` : ""}`;
+
+    all("[data-uq]").forEach(inp => inp.onchange = () => {
+      const u = st.uses.find(x => x.id === inp.dataset.uq);
+      if (u) u.qty = Math.max(0, +inp.value || 0);
+      paint();
+    });
+    all("[data-ux]").forEach(b => b.onclick = () => { st.uses = st.uses.filter(u => u.id !== b.dataset.ux); paint(); });
+    if ($("#cuCat")) $("#cuCat").onchange = e => { st.pickCat = e.target.value; paint(); };
+    if ($("#cuPick")) $("#cuPick").onchange = e => {
+      if (!e.target.value) return;
+      st.uses.push({ id: e.target.value, qty: 1 });
+      /* the type stays put, so two colours from the same box go in back to back */
+      paint();
+    };
+  };
+  const paint = () => {
+    read();
+    const price = +st.price || 0;
+    $("#footValue").textContent = cur(price * st.qty);
+    $("#footNote").textContent = [st.qty > 1 ? cur(price) + " each" : "",
+      st.uses.length ? "uses " + esc(cur(usedCost() * st.qty)) : ""].filter(Boolean).join(" · ");
+    $("#cuN").textContent = st.qty;
+    drawUses();
+  };
+  paint();
+  ["cuPrice", "cuName", "cuNote"].forEach(id => { $("#" + id).oninput = paint; });
+  $("#cuM").onclick = () => { st.qty = Math.max(1, st.qty - 1); paint(); };
+  $("#cuP").onclick = () => { st.qty += 1; paint(); };
+  if ($("#cuTax")) $("#cuTax").onclick = () => {
+    st.taxFree = $("#cuTax").getAttribute("aria-pressed") === "true";
+    $("#cuTax").setAttribute("aria-pressed", String(!st.taxFree));
+  };
+
+  $("#cuGo").onclick = async () => {
+    read();
+    const price = +st.price || 0;
+    if (!(price > 0) && !confirm("No price on this one. Add it as a giveaway?")) return;
+    const name = st.name || "Custom";
+    const uses = st.uses.filter(u => +u.qty > 0);
+    if (existing) {
+      Object.assign(existing, { name, qty: st.qty, base: price, unitCost: usedCost(),
+        note: st.note, taxFree: st.taxFree, uses });
+      await saveTickets(); closeSheet(); renderTicket();
+      return;
+    }
+    addLine({ itemId: "custom-" + uid(), name, opts: [], qty: st.qty, base: price,
+      unitCost: usedCost(), mode: "full", dType: "pct", dVal: 0, reason: "",
+      picks: {}, custom: true, note: st.note, taxFree: st.taxFree, uses });
+    closeSheet();
+    toast(name + " added");
+  };
+  if ($("#cuDel")) $("#cuDel").onclick = async () => {
+    setCart(cart().filter(x => x.uid !== existing.uid));
+    await saveTickets(); closeSheet(); renderTicket();
+  };
+}
+
+/* -------- the cash tray ----------------------------------------
+   The float is money moved into the tray, not money put into the
+   business, so it never shows in the cash flow. What matters at the
+   end of the day is whether the tray holds what it should.
+   ---------------------------------------------------------------- */
+const trayOuts = d => S.cash.filter(c => c.dayId === d.id && c.fromTray);
+function trayNow(d) {
+  const sales = salesOfDay(d.id);
+  const cashIn = r2(sales.filter(s => s.pay === "cash").reduce((a, s) => a + s.total, 0));
+  const cardIn = r2(sales.filter(s => s.pay === "card").reduce((a, s) => a + s.total, 0));
+  const unknown = sales.filter(s => !s.pay);
+  const out = r2(trayOuts(d).reduce((a, c) => a + (+c.amount || 0), 0));
+  const float = d.float == null ? 0 : +d.float;
+  return { float, hasFloat: d.float != null, cashIn, cardIn, out,
+    unknown: unknown.length, unknownAmt: r2(unknown.reduce((a, s) => a + s.total, 0)),
+    expected: r2(float + cashIn - out) };
+}
+const trayDiff = d => (d && d.count) ? r2(+d.count.counted - +d.count.expected) : null;
+function trayWords(diff) {
+  if (diff === null) return { text: "Not counted", cls: "" };
+  if (Math.abs(diff) < 0.005) return { text: "Spot on", cls: "good" };
+  return diff > 0 ? { text: cur(diff) + " over", cls: "" } : { text: cur(-diff) + " short", cls: "warn" };
+}
+
+const lastFloat = () => {
+  const d = S.days.filter(x => x.float != null)
+    .sort((a, b) => (b.date || "").localeCompare(a.date || "") || (b.created || 0) - (a.created || 0))[0];
+  return d ? +d.float : null;
+};
+
+/* asked once, when the day opens */
+function floatAsk(d) {
+  if (!d || d.float != null || d.floatAsked || dayClosed(d)) return;
+  const last = lastFloat();
+  sheet("Cash in the tray", `
+    <p class="note">Count what's in the tray before the first customer. At close-up the app works out what should be
+      there, so you can see if it adds up.</p>
+    <label class="f"><span class="t">Starting with</span>
+      <input type="number" id="flAmt" inputmode="decimal" step="0.01" min="0"
+        placeholder="${last == null ? "50.00" : (+last).toFixed(2)}"></label>
+    ${last == null ? "" : `<button class="btn sec sm auto" id="flSame" style="margin-bottom:6px">Same as last time · ${esc(cur(last))}</button>`}
+    <p class="note" style="margin-top:14px">This is change you already had, not money going into the business, so it
+      stays out of the cash flow.</p>
+  `, [
+    { label: "Start selling", cls: "btn", id: "flGo" },
+    { label: "No tray today", cls: "btn sec", id: "flNone" }
+  ], { narrow: true });
+
+  const save = async v => {
+    d.float = v;
+    d.floatAsked = true;
+    await saveDays();
+    closeSheet(); renderSession();
+    if (v != null) toast("Tray starts at " + cur(v));
+  };
+  if ($("#flSame")) $("#flSame").onclick = () => save(r2(last));
+  $("#flGo").onclick = () => {
+    const v = $("#flAmt").value;
+    save(v === "" ? (last == null ? null : r2(last)) : r2(Math.max(0, +v || 0)));
+  };
+  $("#flNone").onclick = () => save(null);
+}
+
+/* money leaving the tray during the day — it's a real expense, so it goes
+   into the cash flow too, tagged to this day */
+function trayOutSheet(d) {
+  const st = { kind: "expense", amount: "", who: S.settings.lastWho || "", note: "" };
+  sheet("Out of the tray", '<div id="toBody"></div>', [
+    { label: "Record it", cls: "btn", id: "toGo" }
+  ], { narrow: true });
+
+  const read = () => {
+    st.amount = $("#toAmt").value === "" ? "" : Math.max(0, +$("#toAmt").value || 0);
+    if ($("#toWho")) st.who = $("#toWho").value.trim();
+    st.note = $("#toNote").value.trim();
+  };
+  const draw = () => {
+    $("#toBody").innerHTML = `
+      <div class="togs even" style="margin-bottom:14px">
+        <button class="tog sm" data-tk="expense" aria-pressed="${st.kind === "expense"}">Something we bought</button>
+        <button class="tog sm" data-tk="out" aria-pressed="${st.kind === "out"}">Paid to one of us</button>
+      </div>
+      <label class="f"><span class="t">How much</span>
+        <input type="number" id="toAmt" inputmode="decimal" step="0.01" min="0" value="${esc(st.amount)}" placeholder="20.00"></label>
+      ${st.kind === "out" ? `<label class="f"><span class="t">Paid to</span>
+        <input type="text" id="toWho" list="toWhoList" value="${esc(st.who)}" placeholder="Naomi" autocomplete="off">
+        <datalist id="toWhoList">${cashWho().map(w => `<option value="${esc(w)}"></option>`).join("")}</datalist></label>` : ""}
+      <label class="f"><span class="t">What for</span>
+        <input type="text" id="toNote" value="${esc(st.note)}" placeholder="${st.kind === "out" ? "Lunch money" : "Ice and cups"}"></label>
+      <p class="note" style="margin-bottom:0">It comes off what the tray should hold at close-up, and shows in the cash flow.</p>`;
+    all("[data-tk]").forEach(b => b.onclick = () => { read(); st.kind = b.dataset.tk; draw(); });
+  };
+  draw();
+
+  $("#toGo").onclick = async () => {
+    read();
+    if (!(+st.amount > 0)) { toast("How much?"); return; }
+    S.cash.push({ id: uid(), kind: st.kind, date: d.date, amount: +st.amount,
+      who: st.kind === "out" ? st.who : "", note: st.note, created: Date.now(),
+      dayId: d.id, fromTray: true });
+    if (st.kind === "out" && st.who) S.settings.lastWho = st.who;
+    await saveCash(); await saveSettings();
+    closeSheet(); renderSession(); renderReports();
+    toast(cur(st.amount) + " out of the tray");
+  };
+}
+
+/* -------- counting up ----------------------------------------- */
+const DENOMS = [[100, "$100"], [50, "$50"], [20, "$20"], [10, "$10"], [5, "$5"], [1, "$1"],
+  [0.25, "Quarters"], [0.1, "Dimes"], [0.05, "Nickels"], [0.01, "Pennies"]];
+
+/* shared by close-up and by counting again later */
+function trayBlock(d, st) {
+  const t = trayNow(d);
+  st.float = st.float === undefined ? (d.float == null ? "" : +d.float) : st.float;
+  st.counted = st.counted === undefined ? (d.count ? +d.count.counted : "") : st.counted;
+  st.by = st.by || ((d.count && d.count.by) ? Object.assign({}, d.count.by) : {});
+  st.reader = st.reader === undefined ? (d.card ? +d.card.says : "") : st.reader;
+  st.byOpen = st.byOpen || Object.keys(st.by).length > 0;
+
+  return `
+    <div class="card" style="padding:16px 18px 14px">
+      <div class="rowf">
+        <label class="f"><span class="t">Float at the start</span>
+          <input type="number" id="trFloat" inputmode="decimal" step="0.01" min="0" value="${esc(st.float)}" placeholder="0.00"></label>
+        <label class="f"><span class="t">Counted in the tray now</span>
+          <input type="number" id="trCount" inputmode="decimal" step="0.01" min="0" value="${esc(st.counted)}" placeholder="0.00"></label>
+      </div>
+      <button class="tlink" id="trByBtn">${st.byOpen ? "Hide the note-by-note count" : "Count it note by note"}</button>
+      <div class="denoms ${st.byOpen ? "" : "hidden"}" id="trBy">
+        ${DENOMS.map(([v, label]) => `<label class="dn"><span>${label}</span>
+          <input type="number" inputmode="numeric" step="1" min="0" data-dn="${v}" value="${esc(st.by[v] || "")}" placeholder="0"></label>`).join("")}
+      </div>
+      <div id="trRes"></div>
+      ${t.cardIn ? `<label class="f" style="margin:14px 0 0"><span class="t">Card reader says it took</span>
+        <input type="number" id="trReader" inputmode="decimal" step="0.01" min="0" value="${esc(st.reader)}" placeholder="${t.cardIn.toFixed(2)}"></label>
+        <div id="trCardRes"></div>` : ""}
+    </div>`;
+}
+
+function bindTray(d, st) {
+  const t = trayNow(d);
+  const byTotal = () => r2(DENOMS.reduce((a, [v]) => a + v * (+st.by[v] || 0), 0));
+  const expected = () => r2((st.float === "" ? 0 : +st.float || 0) + t.cashIn - t.out);
+
+  const paint = () => {
+    const exp = expected();
+    const counted = st.counted === "" ? null : r2(+st.counted || 0);
+    const diff = counted === null ? null : r2(counted - exp);
+    const w = trayWords(diff);
+    $("#trRes").innerHTML = `
+      <div class="trsum">
+        <div><span>Float</span><b>${esc(cur(st.float === "" ? 0 : +st.float || 0))}</b></div>
+        <div><span>Cash taken</span><b>+${esc(cur(t.cashIn))}</b></div>
+        ${t.out ? `<div><span>Out of the tray</span><b>−${esc(cur(t.out))}</b></div>` : ""}
+        <div class="tot"><span>Should be there</span><b>${esc(cur(exp))}</b></div>
+      </div>
+      ${counted === null
+        ? `<p class="note" style="margin:10px 0 0">Type what you counted and the app checks it against that.</p>`
+        : `<div class="fact ${w.cls}" style="display:inline-block;margin-top:10px;font-size:15px">${esc(w.text)}</div>`}
+      ${t.unknown ? `<p class="note" style="margin:10px 0 0">${t.unknown} sale${t.unknown === 1 ? "" : "s"} from before
+        you recorded how people paid (${esc(cur(t.unknownAmt))}) aren't counted as cash here.</p>` : ""}`;
+
+    if ($("#trCardRes")) {
+      const says = st.reader === "" ? null : r2(+st.reader || 0);
+      const cd = says === null ? null : r2(says - t.cardIn);
+      $("#trCardRes").innerHTML = says === null
+        ? `<p class="note" style="margin:6px 0 0">Card sales here come to ${esc(cur(t.cardIn))}.</p>`
+        : `<p class="note" style="margin:6px 0 0;${Math.abs(cd) < 0.005 ? "" : "color:var(--warn-ink)"}">
+            App has ${esc(cur(t.cardIn))} on card · ${Math.abs(cd) < 0.005 ? "matches" :
+              (cd > 0 ? esc(cur(cd)) + " more on the reader" : esc(cur(-cd)) + " less on the reader")}.</p>`;
+    }
+  };
+  paint();
+
+  $("#trFloat").oninput = () => { st.float = $("#trFloat").value === "" ? "" : +$("#trFloat").value || 0; paint(); };
+  $("#trCount").oninput = () => { st.counted = $("#trCount").value === "" ? "" : +$("#trCount").value || 0; st.by = {}; paint(); };
+  $("#trByBtn").onclick = () => {
+    st.byOpen = !st.byOpen;
+    $("#trBy").classList.toggle("hidden", !st.byOpen);
+    $("#trByBtn").textContent = st.byOpen ? "Hide the note-by-note count" : "Count it note by note";
+  };
+  all("[data-dn]").forEach(inp => inp.oninput = () => {
+    const v = inp.value === "" ? 0 : Math.max(0, Math.floor(+inp.value || 0));
+    if (v) st.by[inp.dataset.dn] = v; else delete st.by[inp.dataset.dn];
+    st.counted = byTotal();
+    $("#trCount").value = st.counted ? st.counted.toFixed(2) : "";
+    paint();
+  });
+  if ($("#trReader")) $("#trReader").oninput = () => {
+    st.reader = $("#trReader").value === "" ? "" : +$("#trReader").value || 0;
+    paint();
+  };
+}
+
+async function saveTray(d, st) {
+  const t = trayNow(d);
+  d.float = st.float === "" ? null : r2(+st.float || 0);
+  if (d.float == null) delete d.float; else d.floatAsked = true;
+  const exp = r2((d.float == null ? 0 : d.float) + t.cashIn - t.out);
+  if (st.counted === "" || st.counted === null || st.counted === undefined) delete d.count;
+  else d.count = { counted: r2(+st.counted || 0), expected: exp, by: Object.assign({}, st.by), ts: Date.now() };
+  if (st.reader === "" || st.reader === null || st.reader === undefined) delete d.card;
+  else d.card = { says: r2(+st.reader || 0), app: t.cardIn, ts: Date.now() };
+  await saveDays();
+  return trayDiff(d);
+}
+
+/* counting again after the day is closed, from the Cash tray report */
+function trayCountSheet(dayId) {
+  const d = dayOf(dayId);
+  if (!d) return;
+  const ev = evOf(d.eventId) || {};
+  const st = {};
+  sheet("Count the tray", `
+    <p class="note">${esc(ev.name || "This market")} on ${esc(fmtDate(d.date, true))}.</p>
+    ${trayBlock(d, st)}
+  `, [{ label: "Save the count", cls: "btn", id: "tcGo" }], { narrow: true });
+  bindTray(d, st);
+  $("#tcGo").onclick = async () => {
+    const diff = await saveTray(d, st);
+    const w = trayWords(diff);
+    closeSheet(); renderReports(); renderSession();
+    toast(diff === null ? "Saved" : "Tray · " + w.text);
+  };
+}
+
+/* -------- paying and tax, all in one place -------- */
+function payTaxSheet() {
+  const draft = {
+    methods: payMethods().map(m => Object.assign({}, m)),
+    tax: taxSet(),
+    change: changeCalcOn(),
+    quick: (quickPay() || {}).id || ""
+  };
+
+  sheet("Paying &amp; tax", '<div id="ptBody"></div>',
+    [{ label: "Save", cls: "btn", id: "ptGo" }], {});
+
+  const read = () => {
+    draft.methods.forEach(m => {
+      const pct = document.querySelector(`[data-pm-pct="${m.id}"]`);
+      const fx = document.querySelector(`[data-pm-fixed="${m.id}"]`);
+      const nm = document.querySelector(`[data-pm-name="${m.id}"]`);
+      if (pct) m.pct = +pct.value || 0;
+      if (fx) m.fixed = +fx.value || 0;
+      if (nm) m.name = nm.value.trim() || m.name;
+    });
+    if ($("#ptRate")) draft.tax.rate = Math.max(0, +$("#ptRate").value || 0);
+  };
+
+  const feeRow = m => `<div class="inset">
+      ${m.id === "card" ? `<span class="b"><span class="n">Card</span>
+        <span class="s">the reader's cut</span></span>`
+      : `<span class="b"><input type="text" data-pm-name="${esc(m.id)}" value="${esc(m.name)}" style="max-width:150px"></span>`}
+      <input type="number" data-pm-pct="${esc(m.id)}" inputmode="decimal" step="0.01" min="0"
+        value="${m.pct || ""}" placeholder="%" aria-label="Percent" style="max-width:88px;text-align:right">
+      <input type="number" data-pm-fixed="${esc(m.id)}" inputmode="decimal" step="0.01" min="0"
+        value="${m.fixed || ""}" placeholder="+ $" aria-label="Plus each sale" style="max-width:88px;text-align:right">
+      ${m.id === "card" ? "" : `<button class="xbtn" data-pm-del="${esc(m.id)}" aria-label="Remove ${esc(m.name)}">✕</button>`}
+    </div>`;
+
+  const draw = () => {
+    $("#ptBody").innerHTML = `
+      <div class="sect" style="margin-top:0">What it costs you to take the money</div>
+      <p class="note">A percent, a few cents a sale, or both. Fees come off what you kept — they never change what the
+        customer pays.</p>
+      <div class="card" style="padding:12px 14px">${draft.methods.map(feeRow).join("")}</div>
+      <button class="btn sec sm auto" id="ptAdd" style="margin-bottom:6px">Add another way to pay</button>
+
+      <div class="sect">On the ticket</div>
+      <p class="note">Cash is always there. Pick what sits beside it — everything else waits behind <b>Other</b>.</p>
+      <div class="togs">${draft.methods.filter(m => m.name.trim()).map(m =>
+        `<button class="tog sm" data-quick="${esc(m.id)}" aria-pressed="${draft.quick === m.id}">${esc(m.name)}</button>`).join("")}</div>
+
+      <div class="sect">Change</div>
+      <div class="togs"><button class="tog sm" id="ptChange" aria-pressed="${draft.change}">Work out the change for cash sales</button></div>
+      <p class="note" style="margin-top:10px">With this on, tapping Cash asks what the customer handed over and shows what
+        goes back.</p>
+
+      <div class="sect">Sales tax</div>
+      <div class="togs"><button class="tog sm" id="ptTaxOn" aria-pressed="${draft.tax.on}">Charge sales tax</button></div>
+      ${draft.tax.on ? `
+        <div class="rowf" style="margin-top:14px">
+          <label class="f"><span class="t">Rate, %</span>
+            <input type="number" id="ptRate" inputmode="decimal" step="0.001" min="0" value="${draft.tax.rate || ""}" placeholder="8"></label>
+        </div>
+        <div class="togs even" style="margin-bottom:14px">
+          <button class="tog sm" data-tm="in" aria-pressed="${draft.tax.mode === "in"}">Prices include it</button>
+          <button class="tog sm" data-tm="add" aria-pressed="${draft.tax.mode === "add"}">Add it at the till</button>
+        </div>
+        <p class="note">${draft.tax.mode === "in"
+          ? "Round prices stay round: a $6 dog is $6, and the tax inside it is worked out for the reports."
+          : "The ticket shows the price, then the tax on top. Handy where customers expect to see it added."}
+          A market in another town can have its own rate — set that on the event. Anything you don't charge tax on can be
+          marked tax-free from its price.</p>` : ""}`;
+
+    $("#ptAdd").onclick = () => { read(); draft.methods.push({ id: uid(), name: "", pct: 0, fixed: 0 }); draw(); };
+    $("#ptChange").onclick = () => { read(); draft.change = !draft.change; draw(); };
+    $("#ptTaxOn").onclick = () => { read(); draft.tax.on = !draft.tax.on; draw(); };
+    all("[data-tm]").forEach(b => b.onclick = () => { read(); draft.tax.mode = b.dataset.tm; draw(); });
+    all("[data-quick]").forEach(b => b.onclick = () => { read(); draft.quick = b.dataset.quick; draw(); });
+    all("[data-pm-del]").forEach(b => b.onclick = () => {
+      read();
+      draft.methods = draft.methods.filter(m => m.id !== b.dataset.pmDel);
+      draw();
+    });
+  };
+  draw();
+
+  $("#ptGo").onclick = async () => {
+    read();
+    S.settings.payMethods = draft.methods
+      .filter(m => m.id === "card" || m.name.trim())
+      .map(m => ({ id: m.id, name: m.id === "card" ? "Card" : m.name.trim(), pct: +m.pct || 0, fixed: +m.fixed || 0 }));
+    S.settings.tax = { on: !!draft.tax.on, rate: +draft.tax.rate || 0, mode: draft.tax.mode === "add" ? "add" : "in" };
+    S.settings.payQuick = S.settings.payMethods.some(m => m.id === draft.quick) ? draft.quick : "";
+    S.settings.changeCalc = !!draft.change;
+    await saveSettings();
+    closeSheet(); renderGrid(); renderTicket(); renderReports();
+    toast("Saved");
+  };
+}
+
+/* -------- offline, and new versions ----------------------------
+   Everything here works with no signal at all. The pill only says so
+   when it's true, and tells you when a newer version is waiting.
+   ---------------------------------------------------------------- */
+const NET = { online: navigator.onLine !== false, update: false, ready: true, probing: false };
+
+function renderNet() {
+  const b = $("#netPill");
+  if (!b) return;
+  let text = "", cls = "";
+  if (NET.update) { text = "New version ready"; cls = "upd"; }
+  else if (!NET.online) { text = "Offline"; cls = "off"; }
+  else if (!NET.ready) { text = "Not saved for offline yet"; cls = "warn"; }
+  b.className = "netpill" + (text ? " " + cls : " hidden");
+  b.innerHTML = text ? `<span class="nd"></span>${esc(text)}` : "";
+}
+
+async function offlineReady() {
+  if (!("caches" in window) || !navigator.serviceWorker || !navigator.serviceWorker.controller) return true;
+  try {
+    const keys = await caches.keys();
+    for (const k of keys) {
+      const c = await caches.open(k);
+      const reqs = await c.keys();
+      if (reqs.some(r => r.url.includes("fonts.gstatic"))) return true;
+    }
+    return false;
+  } catch (e) { return true; }
+}
+
+async function netProbe() {
+  if (NET.probing) return;
+  if (navigator.onLine === false) { NET.online = false; renderNet(); return; }
+  NET.probing = true;
+  try {
+    await fetch("manifest.json", { method: "HEAD", cache: "no-store" });
+    NET.online = true;
+  } catch (e) { NET.online = false; }
+  NET.probing = false;
+  renderNet();
+}
+
+function netInfoSheet() {
+  if (NET.update) {
+    confirmAsk({
+      title: "Load the new version?",
+      body: "Everything saved on this tablet stays exactly as it is. Anything sitting in a ticket right now is kept too.",
+      yes: "Load it now", no: "Later", danger: false,
+      onYes: () => location.reload()
+    });
+    return;
+  }
+  sheet(NET.online ? "Ready for the market" : "You're offline", `
+    <p class="note">${NET.online
+      ? "Stallbook runs entirely on this tablet. Selling, stock, reports — none of it needs a signal."
+      : "No signal, and that's fine. Sell as normal: everything is saved straight onto this tablet and it's all here when you're back."}</p>
+    <div class="card" style="padding:14px 18px">
+      <div class="inset" style="background:var(--paper)">
+        <span class="b"><span class="n">Selling and saving</span><span class="s">works with no signal at all</span></span>
+        <span class="fact good">Fine</span></div>
+      <div class="inset" style="background:var(--paper)">
+        <span class="b"><span class="n">Saved for offline</span>
+          <span class="s">${NET.ready ? "the app is stored on this tablet" : "open it once with a signal so it finishes saving"}</span></span>
+        <span class="fact ${NET.ready ? "good" : "warn"}">${NET.ready ? "Done" : "Not yet"}</span></div>
+    </div>
+    <p class="note">Backups are the one thing worth a signal — save one to the Files app after each market.</p>
+  `, null, { narrow: true });
+}
+
+function netWatch() {
+  const pill = $("#netPill");
+  if (pill) pill.onclick = netInfoSheet;
+  addEventListener("online", netProbe);
+  addEventListener("offline", () => { NET.online = false; renderNet(); });
+  addEventListener("visibilitychange", () => {
+    if (document.visibilityState !== "visible") return;
+    netProbe();
+    if (navigator.serviceWorker && navigator.serviceWorker.getRegistration)
+      navigator.serviceWorker.getRegistration().then(r => r && r.update()).catch(() => {});
+  });
+  if (navigator.serviceWorker) {
+    const had = !!navigator.serviceWorker.controller;
+    navigator.serviceWorker.addEventListener("controllerchange", () => {
+      if (had) { NET.update = true; renderNet(); }
+    });
+  }
+  setInterval(() => { if (document.visibilityState === "visible") netProbe(); }, 60000);
+  netProbe();
+  setTimeout(() => offlineReady().then(r => { NET.ready = r; renderNet(); }), 4000);
+  renderNet();
+}
+
+/* ============================================================
+   Receipts, and the longer view: markets, hours and the year
+   ============================================================ */
+
+/* -------- receipt photos --------------------------------------
+   Kept in their own store, not inside every cash entry, so an
+   ordinary backup stays small enough to email. Safe → Receipts
+   saves them all as one page, and the year summary carries them.
+   -------------------------------------------------------------- */
+const saveReceipts = () => kvSet("receipts", S.receipts);
+const receiptOf = id => (id && S.receipts && S.receipts[id]) || null;
+
+/* bigger than a product photo — small print has to stay readable */
+function shrinkBig(file) {
+  return new Promise(res => {
+    const r = new FileReader();
+    r.onload = () => {
+      const img = new Image();
+      img.onload = () => {
+        const M = 1400, sc = Math.min(1, M / Math.max(img.width, img.height));
+        const c = document.createElement("canvas");
+        c.width = Math.round(img.width * sc); c.height = Math.round(img.height * sc);
+        c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+        res(c.toDataURL("image/jpeg", 0.7));
+      };
+      img.onerror = () => res("");
+      img.src = r.result;
+    };
+    r.onerror = () => res("");
+    r.readAsDataURL(file);
+  });
+}
+
+function receiptBlock(id) {
+  const r = receiptOf(id);
+  return `<div class="inset rcpt">
+    <span class="rcptshot ${r ? "" : "empty"}" ${r ? `style="background-image:url('${r.data}')"` : ""}>${r ? "" : ICON_PHOTO}</span>
+    <span class="b"><span class="n">Receipt</span>
+      <span class="s">${r ? "Photographed " + esc(fmtDate(isoOf(new Date(r.ts)), true)) : "Photograph it now and it's filed with this"}</span></span>
+    ${r ? `<button class="btn sec sm auto" id="rcpView">See it</button>
+           <button class="xbtn" id="rcpClear" aria-label="Remove the receipt">✕</button>`
+        : `<button class="btn sec sm auto" id="rcpAdd">Add a photo</button>`}
+    <input type="file" id="rcpFile" accept="image/*" class="offscreen">
+  </div>`;
+}
+
+/* get() reads the current id off whatever is being edited, set() writes it back */
+function bindReceipt(get, set, redraw) {
+  const file = $("#rcpFile");
+  if ($("#rcpAdd")) $("#rcpAdd").onclick = () => file.click();
+  if ($("#rcpView")) $("#rcpView").onclick = () => receiptViewer(get());
+  if (file) file.onchange = async e => {
+    const f = e.target.files[0];
+    e.target.value = "";
+    if (!f) return;
+    const data = await shrinkBig(f);
+    if (!data) { toast("That photo wouldn't open"); return; }
+    const id = get() || ("r" + uid());
+    S.receipts[id] = { id, data, ts: Date.now() };
+    await saveReceipts();
+    set(id); redraw();
+  };
+  if ($("#rcpClear")) $("#rcpClear").onclick = async () => {
+    const id = get();
+    if (id && S.receipts[id]) { delete S.receipts[id]; await saveReceipts(); }
+    set(""); redraw();
+  };
+}
+
+/* the same wiring, scoped to one box — for sheets with more than one receipt on them */
+function bindReceiptIn(box, get, set, redraw) {
+  const q = sel => box.querySelector(sel);
+  const file = q("#rcpFile");
+  if (q("#rcpAdd")) q("#rcpAdd").onclick = () => file.click();
+  if (q("#rcpView")) q("#rcpView").onclick = () => receiptViewer(get());
+  if (file) file.onchange = async e => {
+    const f = e.target.files[0];
+    e.target.value = "";
+    if (!f) return;
+    const data = await shrinkBig(f);
+    if (!data) { toast("That photo wouldn't open"); return; }
+    const id = get() || ("r" + uid());
+    S.receipts[id] = { id, data, ts: Date.now() };
+    await saveReceipts();
+    set(id); redraw();
+  };
+  if (q("#rcpClear")) q("#rcpClear").onclick = async () => {
+    const id = get();
+    if (id && S.receipts[id]) { delete S.receipts[id]; await saveReceipts(); }
+    set(""); redraw();
+  };
+}
+
+function receiptViewer(id) {
+  const r = receiptOf(id);
+  if (!r) return;
+  const host = $("#confirms");
+  host.innerHTML = `<div class="scrim confirm">
+    <div class="sheet" role="dialog" aria-modal="true" style="max-width:720px">
+      <div class="shead"><h3>Receipt</h3>
+        <button class="pebble lg" id="rvClose" aria-label="Close">${ICON.close}</button></div>
+      <div class="sbody"><img src="${r.data}" alt="Receipt" style="width:100%;border-radius:18px;display:block"></div>
+    </div></div>`;
+  const close = () => { host.innerHTML = ""; };
+  host.querySelector(".scrim").addEventListener("click", e => { if (e.target.classList.contains("scrim")) close(); });
+  $("#rvClose").onclick = close;
+}
+
+/* every receipt with what it belongs to, newest first */
+function receiptsList() {
+  const out = [];
+  for (const c of S.cash) if (receiptOf(c.receipt))
+    out.push({ id: c.receipt, date: c.date, amount: -(CASH_KINDS[c.kind] || CASH_KINDS.in).sign * (+c.amount || 0),
+      what: (CASH_KINDS[c.kind] || CASH_KINDS.in).label + (c.note ? " · " + c.note : "") });
+  for (const l of S.lots) if (receiptOf(l.receipt)) {
+    const m = matById(lotRef(l));
+    out.push({ id: l.receipt, date: l.date, amount: (+l.qty || 0) * (+l.unitCost || 0),
+      what: "Stock · " + (m ? m.name : "supplies") + (l.note ? " · " + l.note : "") });
+  }
+  for (const ev of S.events) for (const a of (ev.apps || [])) if (receiptOf(a.receipt))
+    out.push({ id: a.receipt, date: a.paidOn || "", amount: +a.fee || 0,
+      what: "Stall fee · " + (ev.name || "Event") });
+  for (const a of S.assets) {
+    if (receiptOf(a.receipt))
+      out.push({ id: a.receipt, date: a.bought || "", amount: assetTotal(a), what: "Equipment · " + (a.name || "kit") });
+    for (const u of (a.upkeep || [])) if (receiptOf(u.receipt))
+      out.push({ id: u.receipt, date: u.date || "", amount: +u.cost || 0,
+        what: "Repair · " + (a.name || "kit") + (u.what ? " · " + u.what : "") });
+  }
+  return out.sort((x, y) => (y.date || "").localeCompare(x.date || ""));
+}
+
+/* receipts nobody points at any more — swept once at start-up */
+async function sweepReceipts() {
+  if (!S.receipts) return;
+  const keep = new Set(receiptsList().map(r => r.id));
+  const binned = JSON.stringify(S.trash || []);
+  let gone = 0;
+  for (const id of Object.keys(S.receipts))
+    if (!keep.has(id) && !binned.includes(id)) { delete S.receipts[id]; gone++; }
+  if (gone) await saveReceipts();
+}
+
+const RECEIPT_STYLE = `body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;color:#2c2a26;
+  background:#fbf8f2;margin:0;padding:28px}
+  h1{font-size:24px;margin:0 0 4px}.sub{color:#8d8578;font-size:14px;margin:0 0 24px}
+  .r{background:#fff;border-radius:14px;padding:16px;margin-bottom:16px;box-shadow:0 1px 3px rgba(0,0,0,.08);
+    break-inside:avoid;page-break-inside:avoid}
+  .r h2{font-size:16px;margin:0 0 2px}.r .m{color:#8d8578;font-size:13px;margin:0 0 10px}
+  .r img{width:100%;max-width:560px;border-radius:10px;display:block}
+  table{border-collapse:collapse;width:100%;max-width:760px}
+  td,th{text-align:left;padding:6px 10px 6px 0;font-size:14px;border-bottom:1px solid #eee}
+  td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}
+  h2.sec{font-size:15px;text-transform:uppercase;letter-spacing:.08em;color:#8d8578;margin:26px 0 8px}
+  tr.tot td{font-weight:700;border-bottom:2px solid #2c2a26}
+  @media print{body{background:#fff;padding:0}.r{box-shadow:none;border:1px solid #eee}}`;
+
+function receiptsPage(list, heading) {
+  const rows = list.map(r => {
+    const img = receiptOf(r.id);
+    if (!img) return "";
+    return `<div class="r"><h2>${esc(r.what)}</h2>
+      <p class="m">${esc(r.date ? fmtDate(r.date, true) : "No date")}${r.amount ? " · " + esc(cur(Math.abs(r.amount))) : ""}</p>
+      <img src="${img.data}" alt=""></div>`;
+  }).join("");
+  return `<!doctype html><html><head><meta charset="utf-8"><title>${esc(heading)}</title>
+    <style>${RECEIPT_STYLE}</style></head><body>
+    <h1>${esc(heading)}</h1>
+    <p class="sub">${list.length} receipt${list.length === 1 ? "" : "s"} · saved from Stallbook on ${esc(fmtDate(todayISO(), true))}</p>
+    ${rows || "<p>No receipts yet.</p>"}</body></html>`;
+}
+
+function exportReceipts() {
+  const list = receiptsList();
+  if (!list.length) { toast("No receipts photographed yet"); return; }
+  saveOut("stallbook-receipts-" + todayISO() + ".html", receiptsPage(list, "Receipts"), "text/html");
+}
+
+/* -------- was this market worth going to? ----------------------
+   One row per event, every visit inside the dates counted whole:
+   what it took, what the balloons cost, the fee, the travel, and
+   what was actually left. Net per hour is the one that settles
+   arguments about the long ones.
+   ---------------------------------------------------------------- */
+function visitHours(a) {
+  if (!a.startTime || !a.endTime) return 0;
+  const [h1, m1] = a.startTime.split(":").map(Number);
+  const [h2, m2] = a.endTime.split(":").map(Number);
+  let mins = (h2 * 60 + m2) - (h1 * 60 + m1);
+  if (mins <= 0) mins += 24 * 60;
+  return Math.round(mins / 60 * daysOfApp(a.id).length * 10) / 10;
+}
+function eventRows() {
+  const by = {};
+  for (const v of filteredVisits()) {
+    const m = appMoney(v.ev, v.app);
+    const k = v.ev.id;
+    by[k] = by[k] || { ev: v.ev, visits: 0, taken: 0, tax: 0, fees: 0, goods: 0, costs: 0, net: 0, hours: 0, things: 0, sales: 0, last: null };
+    const r = by[k];
+    r.visits++; r.taken += m.taken; r.tax += m.tax; r.fees += m.fees;
+    r.goods += m.goods; r.costs += m.costs; r.net += m.net; r.sales += m.sales;
+    r.hours += visitHours(v.app);
+    r.things += daysOfApp(v.app.id).flatMap(d => salesOfDay(d.id)).flatMap(x => x.lines || []).reduce((a, l) => a + l.qty, 0);
+    const first = daysOfApp(v.app.id)[0];
+    if (first && (!r.last || first.date > r.last)) r.last = first.date;
+  }
+  return Object.values(by).map(r => Object.assign(r, {
+    taken: r2(r.taken), net: r2(r.net), goods: r2(r.goods), costs: r2(r.costs),
+    perVisit: r2(r.net / (r.visits || 1)),
+    perHour: r.hours ? r2(r.net / r.hours) : null
+  })).sort((a, b) => b.net - a.net);
+}
+
+function reportEvents() {
+  const rows = eventRows();
+  if (!rows.length) return `<p class="note">No visits in these dates. Widen the range above, or add the selling days
+    under <b>Events</b>.</p>`;
+
+  const best = rows[0];
+  const totalNet = r2(rows.reduce((a, r) => a + r.net, 0));
+  const totalVisits = rows.reduce((a, r) => a + r.visits, 0);
+  const timed = rows.filter(r => r.perHour !== null);
+  const max = Math.max(...rows.map(r => Math.abs(r.net)), 0.01);
+
+  const row = r => {
+    const good = r.net >= 0;
+    return `<button class="inset" data-evrep="${esc(r.ev.id)}" style="width:100%;text-align:left">
+      <span class="b"><span class="n">${esc(r.ev.name || "Untitled event")}</span>
+        <span class="s">${r.visits} visit${r.visits === 1 ? "" : "s"} · took ${esc(cur(r.taken))} ·
+          balloons ${esc(cur(r.goods))} · stall and travel ${esc(cur(r.costs))}${
+          r.perHour === null ? "" : " · " + esc(cur(r.perHour)) + " an hour"}</span>
+        <span class="t" style="display:block;height:8px;border-radius:999px;background:var(--sand);overflow:hidden;margin-top:8px">
+          <i style="display:block;height:100%;width:${Math.max(2, Math.round(Math.abs(r.net) / max * 100))}%;border-radius:999px;background:${good ? "#7cb08c" : "#e0a07a"}"></i></span></span>
+      <span class="r" style="color:${good ? "var(--green-deep)" : "var(--warn-ink)"}">${good ? "" : "−"}${esc(cur(Math.abs(r.net)))}</span>
+    </button>`;
+  };
+
+  return `
+    <div class="kpis">
+      <div class="kpi big tint"><div class="k">Best market</div><div class="v sm">${esc(best.ev.name || "Untitled")}</div>
+        <div class="n">kept ${esc(cur(best.net))} over ${best.visits} visit${best.visits === 1 ? "" : "s"}</div></div>
+      <div class="kpi"><div class="k">Kept altogether</div><div class="v">${totalNet < 0 ? "−" : ""}${esc(cur(Math.abs(totalNet)))}</div>
+        <div class="n">${rows.length} market${rows.length === 1 ? "" : "s"} · ${totalVisits} visit${totalVisits === 1 ? "" : "s"}</div></div>
+      <div class="kpi"><div class="k">Average a visit</div><div class="v">${esc(cur(r2(totalNet / (totalVisits || 1))))}</div>
+        <div class="n">after everything</div></div>
+      ${timed.length ? `<div class="kpi"><div class="k">Best per hour</div>
+        <div class="v">${esc(cur(timed.sort((a, b) => b.perHour - a.perHour)[0].perHour))}</div>
+        <div class="n">${esc(timed[0].ev.name || "Untitled")}</div></div>` : ""}
+    </div>
+    <div class="card"><div class="sect" style="margin-top:0">Every market, best first</div>
+      <p class="note" style="margin-top:-6px">Tap one to see each visit on its own. Net is what was left after the
+        balloons, the stall fee, travel, sales tax and card fees.</p>
+      ${rows.map(row).join("")}</div>
+    ${timed.length < rows.length ? `<p class="note">Add opening and closing times to an application and that market
+      gets a per-hour figure too.</p>` : ""}`;
+}
+
+/* one market, visit by visit */
+function eventReport(evId) {
+  const ev = evOf(evId);
+  if (!ev) return;
+  const visits = filteredVisits().filter(v => v.ev.id === evId)
+    .map(v => ({ v, m: appMoney(v.ev, v.app), days: daysOfApp(v.app.id), hours: visitHours(v.app) }))
+    .sort((a, b) => ((b.days[0] || {}).date || "").localeCompare((a.days[0] || {}).date || ""));
+
+  sheet(esc(ev.name || "Event"), `
+    <p class="note">${visits.length} visit${visits.length === 1 ? "" : "s"} in these dates.
+      ${ev.travel ? "Travel counts " + esc(cur(+ev.travel)) + " each time." : ""}</p>
+    ${visits.map(({ v, m, days, hours }) => {
+      const when = days.length ? (days.length === 1 ? fmtDate(days[0].date, true)
+        : fmtDate(days[0].date, true) + " – " + fmtDate(days[days.length - 1].date, true)) : "No dates";
+      return `<div class="grp">
+        <div class="gh" style="margin-bottom:8px">
+          <span style="flex:1;min-width:0"><b style="font-family:var(--display);font-size:17px">${esc(when)}</b>
+            <span class="note" style="margin:0 0 0 6px">${days.length} day${days.length === 1 ? "" : "s"}${hours ? " · " + hours + "h" : ""}</span></span>
+          <b style="font-family:var(--display);font-size:18px;color:${m.net >= 0 ? "var(--green-deep)" : "var(--warn-ink)"}">${m.net < 0 ? "−" : ""}${esc(cur(Math.abs(m.net)))}</b>
+        </div>
+        <div class="trsum">
+          <div><span>Took</span><b>${esc(cur(m.taken))}</b></div>
+          ${m.tax ? `<div><span>Sales tax</span><b>−${esc(cur(m.tax))}</b></div>` : ""}
+          ${m.fees ? `<div><span>Card fees</span><b>−${esc(cur(m.fees))}</b></div>` : ""}
+          <div><span>Balloons</span><b>−${esc(cur(m.goods))}</b></div>
+          <div><span>Stall fee and travel</span><b>−${esc(cur(m.costs))}</b></div>
+          <div class="tot"><span>Kept${hours ? " · " + esc(cur(r2(m.net / hours))) + " an hour" : ""}</span><b>${esc(cur(m.net))}</b></div>
+        </div>
+        ${v.app.review ? `<p class="note" style="margin:10px 0 0">${esc(v.app.review)}</p>` : ""}
+      </div>`;
+    }).join("") || '<p class="note">Nothing recorded here yet.</p>'}
+  `, null);
+}
+
+/* -------- when the money comes in ------------------------------ */
+function reportHours() {
+  const sales = filteredSales();
+  if (!sales.length) return `<p class="note">No sales in these dates.</p>`;
+
+  const dayIds = new Set(sales.map(s => s.dayId));
+  const hours = {};
+  for (const s of sales) {
+    const h = new Date(s.ts).getHours();
+    hours[h] = hours[h] || { amt: 0, n: 0, qty: 0 };
+    hours[h].amt += s.total;
+    hours[h].n += 1;
+    hours[h].qty += (s.lines || []).reduce((a, l) => a + l.qty, 0);
+  }
+  const keys = Object.keys(hours).map(Number).sort((a, b) => a - b);
+  const span = [];
+  for (let h = keys[0]; h <= keys[keys.length - 1]; h++) span.push(h);
+  const max = Math.max(...span.map(h => (hours[h] || { amt: 0 }).amt), 0.01);
+  const busiest = keys.slice().sort((a, b) => hours[b].amt - hours[a].amt)[0];
+  const days = dayIds.size;
+  const perDay = RH.avg && days > 1;
+  const hourName = h => new Date(2020, 0, 1, h).toLocaleTimeString(undefined, { hour: "numeric" });
+  const half = r2(sales.reduce((a, s) => a + s.total, 0) / 2);
+  let run = 0, median = null;
+  for (const h of span) { run += (hours[h] || { amt: 0 }).amt; if (median === null && run >= half) median = h; }
+
+  return `
+    <div class="kpis">
+      <div class="kpi big tint"><div class="k">Busiest hour</div><div class="v">${esc(hourName(busiest))}</div>
+        <div class="n">${esc(cur(r2(hours[busiest].amt / (perDay ? days : 1))))}${perDay ? " a day" : ""} · ${hours[busiest].n} sale${hours[busiest].n === 1 ? "" : "s"}</div></div>
+      <div class="kpi"><div class="k">Selling from</div><div class="v sm">${esc(hourName(span[0]))} – ${esc(hourName(span[span.length - 1] + 1))}</div>
+        <div class="n">across ${days} market day${days === 1 ? "" : "s"}</div></div>
+      <div class="kpi"><div class="k">Half the money is in by</div><div class="v sm">${esc(hourName((median === null ? busiest : median) + 1))}</div>
+        <div class="n">counting from opening</div></div>
+    </div>
+    ${days > 1 ? `<div class="seg" style="margin-bottom:14px">
+      <button data-rh="all" aria-selected="${!RH.avg}">Everything added up</button>
+      <button data-rh="avg" aria-selected="${RH.avg}">Average market day</button>
+    </div>` : ""}
+    <div class="card"><div class="sect" style="margin-top:0">Hour by hour</div>
+      <div class="bars">${span.map(h => {
+        const v = hours[h] || { amt: 0, n: 0, qty: 0 };
+        const amt = perDay ? v.amt / days : v.amt;
+        return `<div class="bar">
+          <span class="l">${esc(hourName(h))}</span>
+          <span class="t"><i style="width:${Math.max(1, Math.round(v.amt / max * 100))}%"></i></span>
+          <span class="v">${esc(cur(r2(amt)))}</span>
+        </div>`;
+      }).join("")}</div>
+      <p class="note" style="margin:12px 0 0">${perDay
+        ? "What a typical market day looks like — the total for each hour shared across " + days + " days."
+        : "Every sale in these dates, by the hour it was rung up."} Quiet hours are worth knowing: that's when to take a
+        break, restock, or pack down early.</p></div>`;
+}
+
+/* -------- the year, on one page -------------------------------
+   Ignores the date filter on purpose: a tax year is a tax year.
+   Everything here is read back out of what's already recorded.
+   ---------------------------------------------------------------- */
+const RH = { avg: false };
+
+/* how the dates read on the page and in the file name */
+function spanWords(from, to) {
+  if (!from && !to) return "everything so far";
+  if (from && to && from.slice(0, 4) === to.slice(0, 4)
+    && from.endsWith("-01-01") && (to === todayISO() || to.endsWith("-12-31")))
+    return to === todayISO() && from.slice(0, 4) === todayISO().slice(0, 4)
+      ? from.slice(0, 4) + " so far" : from.slice(0, 4);
+  return (from ? fmtDate(from, true) : "the start") + " – " + (to ? fmtDate(to, true) : "today");
+}
+const spanFile = (from, to) => (from || "start") + "-to-" + (to || todayISO());
+
+function yearSummary(from, to) {
+  const inY = d => !!d && (!from || d >= from) && (!to || d <= to);
+
+  const days = S.days.filter(d => inY(d.date));
+  const dayIds = new Set(days.map(d => d.id));
+  const sales = S.sales.filter(s => dayIds.has(s.dayId));
+  const lines = sales.flatMap(s => s.lines || []);
+
+  const gross = r2(sales.reduce((a, s) => a + s.total, 0));
+  const tax = r2(sales.reduce((a, s) => a + saleTax(s), 0));
+  const fees = r2(sales.reduce((a, s) => a + saleFee(s), 0));
+  const goods = r2(sales.reduce((a, s) => a + s.cost, 0));
+  const discounts = r2(lines.filter(l => l.mode === "discount" || l.mode === "set")
+    .reduce((a, l) => a + Math.max(0, l.listed - l.total), 0));
+  const gifts = r2(lines.filter(l => l.mode === "free").reduce((a, l) => a + l.listed, 0));
+  const pays = {};
+  for (const s of sales) { if (!(s.total > 0)) continue; const k = saleHow(s); pays[k] = r2((pays[k] || 0) + s.total); }
+
+  const materials = r2(S.lots.filter(l => inY(l.date)).reduce((a, l) => a + (+l.qty || 0) * (+l.unitCost || 0), 0));
+  const written = r2(liveWriteoffs().filter(w => inY(w.date)).reduce((a, w) => a + (+w.cost || 0), 0));
+  const gear = r2(S.assets.filter(a => inY(a.bought)).reduce((a, x) => a + assetTotal(x), 0));
+
+  let booth = 0, travel = 0, visits = 0;
+  for (const ev of S.events) for (const a of (ev.apps || [])) {
+    if (a.status === "paid" && inY(a.paidOn)) booth += +a.fee || 0;
+    const first = daysOfApp(a.id)[0];
+    if (first && appStarted(a) && inY(first.date)) { travel += +ev.travel || 0; visits++; }
+  }
+  booth = r2(booth); travel = r2(travel);
+
+  const expenses = S.cash.filter(c => c.kind === "expense" && inY(c.date));
+  const other = r2(expenses.reduce((a, c) => a + (+c.amount || 0), 0));
+  const upkeep = r2(S.assets.flatMap(a => (a.upkeep || []).map(u => Object.assign({ asset: a.name }, u)))
+    .filter(u => inY(u.date)).reduce((a, u) => a + (+u.cost || 0), 0));
+  const putIn = r2(S.cash.filter(c => (c.kind === "in" || c.kind === "start") && inY(c.date)).reduce((a, c) => a + (+c.amount || 0), 0));
+  const drawn = r2(S.cash.filter(c => c.kind === "out" && inY(c.date)).reduce((a, c) => a + (+c.amount || 0), 0));
+  const trayOff = r2(days.reduce((a, d) => a + (trayDiff(d) || 0), 0));
+  const counted = days.filter(d => d.count).length;
+  const refunds = S.reversals.filter(r => inY((dayOf(r.dayId) || {}).date)).reduce((a, r) => a + (+r.total || 0), 0);
+
+  const netSales = r2(gross - tax);
+  const kept = r2(netSales - fees - goods - booth - travel - other - upkeep + trayOff);
+  const closing = r2(cashMoves().filter(m => !to || m.date <= to).reduce((a, m) => a + m.amount, 0));
+
+  const evRows = {};
+  for (const s of sales) {
+    const c = ctxOf(s.dayId);
+    evRows[c.event] = evRows[c.event] || { taken: 0, days: new Set() };
+    evRows[c.event].taken += s.total;
+    evRows[c.event].days.add(s.dayId);
+  }
+  const markets = Object.entries(evRows).map(([n, v]) => ({ name: n, taken: r2(v.taken), days: v.days.size }))
+    .sort((a, b) => b.taken - a.taken);
+
+  return { from, to, span: spanWords(from, to), days, sales, lines, gross, tax, fees, goods, discounts, gifts, pays,
+    materials, written, gear, booth, travel, visits, expenses, other, upkeep, putIn, drawn, trayOff, counted,
+    refunds: r2(refunds), netSales, kept, closing, markets,
+    things: lines.reduce((a, l) => a + l.qty, 0),
+    sellingDays: new Set(sales.map(s => s.dayId)).size };
+}
+
+/* label, amount, and how it should read — shared by the screen, the page and the spreadsheet */
+function yearLines(Y) {
+  const L = [];
+  const add = (sec, label, amount, kind) => L.push({ sec, label, amount: r2(amount), kind: kind || "" });
+  add("Money in", "Taken at the stall", Y.gross);
+  if (Y.tax) add("Money in", "Sales tax collected (not yours)", -Y.tax);
+  add("Money in", "Sales for the year", Y.netSales, "tot");
+  for (const [k, v] of Object.entries(Y.pays).sort((a, b) => b[1] - a[1])) add("How people paid", k, v);
+  add("What it cost", "What the balloons cost", -Y.goods);
+  if (Y.fees) add("What it cost", "Card and app fees", -Y.fees);
+  if (Y.booth) add("What it cost", "Stall fees", -Y.booth);
+  if (Y.travel) add("What it cost", "Travel", -Y.travel);
+  for (const c of Y.expenses) add("What it cost", "Other · " + (c.note || "expense") + " · " + fmtDate(c.date, true), -(+c.amount || 0));
+  if (Y.upkeep) add("What it cost", "Repairs and changes to equipment", -Y.upkeep);
+  if (Y.trayOff) add("What it cost", Y.trayOff < 0 ? "Cash tray short" : "Cash tray over", Y.trayOff);
+  add("What it cost", "Kept from sales", Y.kept, "tot");
+  add("What was bought", "Stock bought (what went on the shelf)", -Y.materials);
+  if (Y.gear) add("What was bought", "Equipment bought", -Y.gear);
+  if (Y.written) add("What was bought", "Stock written off", -Y.written);
+  if (Y.putIn) add("The two of you", "Money put in", Y.putIn);
+  if (Y.drawn) add("The two of you", "Paid to owners", -Y.drawn);
+  add("The two of you", "In the business at the end", Y.closing, "tot");
+  add("In numbers", "Markets", Y.markets.length);
+  add("In numbers", "Selling days", Y.sellingDays);
+  add("In numbers", "Sales", Y.sales.length);
+  add("In numbers", "Things sold", Y.things);
+  if (Y.gifts) add("In numbers", "Given away, at list price", Y.gifts);
+  if (Y.discounts) add("In numbers", "Given in deals", Y.discounts);
+  if (Y.refunds) add("In numbers", "Reversed sales", Y.refunds);
+  return L;
+}
+
+const yearMoney = k => !["Markets", "Selling days", "Sales", "Things sold"].includes(k);
+
+function reportYear() {
+  const Y = yearSummary(RF.from, RF.to);
+  const L = yearLines(Y);
+  const secs = [...new Set(L.map(x => x.sec))];
+
+  const money = v => (v < 0 ? "−" : "") + cur(Math.abs(v));
+  const rows = sec => L.filter(x => x.sec === sec).map(x => `
+    <div class="inset" style="background:${x.kind === "tot" ? "var(--green-tint)" : "var(--paper)"}">
+      <span class="b"><span class="n" style="font-size:16px;${x.kind === "tot" ? "color:var(--green-deep)" : "font-family:var(--body);font-weight:600"}">${esc(x.label)}</span></span>
+      <span class="r" style="${x.amount < 0 ? "color:var(--warn-ink)" : ""}">${yearMoney(x.label) ? esc(money(x.amount)) : x.amount}</span>
+    </div>`).join("");
+
+  return `
+    <div class="filters" style="margin-bottom:16px">
+      <button class="btn sec sm auto" id="yPage">Save it as a page</button>
+      <button class="btn sec sm auto" id="yCsv">Spreadsheet</button>
+    </div>
+    <div class="kpis">
+      <div class="kpi big"><div class="k">Sales · ${esc(Y.span)}</div><div class="v">${esc(cur(Y.netSales))}</div>
+        <div class="n">${Y.sales.length} sale${Y.sales.length === 1 ? "" : "s"} over ${Y.sellingDays} day${Y.sellingDays === 1 ? "" : "s"}</div></div>
+      <div class="kpi big tint"><div class="k">Kept from sales</div><div class="v">${Y.kept < 0 ? "−" : ""}${esc(cur(Math.abs(Y.kept)))}</div>
+        <div class="n">before anything paid to you</div></div>
+      <div class="kpi"><div class="k">Paid to owners</div><div class="v">${esc(cur(Y.drawn))}</div>
+        <div class="n">${Y.putIn ? esc(cur(Y.putIn)) + " put in" : "nothing put in"}</div></div>
+      <div class="kpi"><div class="k">Sales tax collected</div><div class="v">${esc(cur(Y.tax))}</div>
+        <div class="n">${Y.tax ? "set this aside" : "none charged"}</div></div>
+    </div>
+    ${secs.map(sec => `<div class="card"><div class="sect" style="margin-top:0">${esc(sec)}</div>${rows(sec)}</div>`).join("")}
+    ${Y.markets.length ? `<div class="card"><div class="sect" style="margin-top:0">Markets by takings</div>
+      ${Y.markets.map(m => `<div class="inset">
+        <span class="b"><span class="n">${esc(m.name)}</span><span class="s">${m.days} day${m.days === 1 ? "" : "s"}</span></span>
+        <span class="r">${esc(cur(m.taken))}</span></div>`).join("")}</div>` : ""}
+    <p class="note">Set the dates above — it opens on the year so far. Stock bought is money that went out in this
+      time; what the balloons cost is what actually went out in things sold, so the two differ by whatever is still on
+      the shelf. Equipment is listed on its own because it's kit, not a running cost. This is a summary of your own
+      records, not tax advice — ${Y.counted} of ${Y.days.length} market day${Y.days.length === 1 ? " was" : "s were"}
+      counted at close-up.</p>`;
+}
+
+function yearPage(Y) {
+  const L = yearLines(Y);
+  const secs = [...new Set(L.map(x => x.sec))];
+  const money = v => (v < 0 ? "−" : "") + cur(Math.abs(v));
+  const table = sec => `<h2 class="sec">${esc(sec)}</h2><table>${L.filter(x => x.sec === sec).map(x =>
+    `<tr class="${x.kind}"><td>${esc(x.label)}</td><td class="n">${yearMoney(x.label) ? esc(money(x.amount)) : x.amount}</td></tr>`).join("")}</table>`;
+  const receipts = receiptsList().filter(r => (!Y.from || r.date >= Y.from) && (!Y.to || r.date <= Y.to));
+  return `<!doctype html><html><head><meta charset="utf-8"><title>Stallbook · ${esc(Y.span)}</title>
+    <style>${RECEIPT_STYLE}</style></head><body>
+    <h1>Stallbook · ${esc(Y.span)}</h1>
+    <p class="sub">Saved from Stallbook on ${esc(fmtDate(todayISO(), true))} · ${Y.markets.length} market${Y.markets.length === 1 ? "" : "s"},
+      ${Y.sellingDays} selling day${Y.sellingDays === 1 ? "" : "s"}, ${Y.sales.length} sale${Y.sales.length === 1 ? "" : "s"}</p>
+    ${secs.map(table).join("")}
+    ${Y.markets.length ? `<h2 class="sec">Markets by takings</h2><table>
+      <tr><th>Market</th><th class="n">Days</th><th class="n">Taken</th></tr>
+      ${Y.markets.map(m => `<tr><td>${esc(m.name)}</td><td class="n">${m.days}</td><td class="n">${esc(cur(m.taken))}</td></tr>`).join("")}</table>` : ""}
+    <p class="sub" style="margin-top:26px">Stock bought is money that went out this year; what the balloons cost is what
+      went out inside things sold. Equipment is kit rather than a running cost. A summary of your own records, not tax
+      advice.</p>
+    ${receipts.length ? `<h2 class="sec">Receipts</h2>${receipts.map(r => {
+      const img = receiptOf(r.id);
+      return img ? `<div class="r"><h2>${esc(r.what)}</h2>
+        <p class="m">${esc(fmtDate(r.date, true))}${r.amount ? " · " + esc(cur(Math.abs(r.amount))) : ""}</p>
+        <img src="${img.data}" alt=""></div>` : "";
+    }).join("")}` : ""}
+    </body></html>`;
+}
+
+function bindYear() {
+  if ($("#yPage")) $("#yPage").onclick = () => {
+    const Y = yearSummary(RF.from, RF.to);
+    saveOut("stallbook-" + spanFile(RF.from, RF.to) + ".html", yearPage(Y), "text/html");
+  };
+  if ($("#yCsv")) $("#yCsv").onclick = () => {
+    const Y = yearSummary(RF.from, RF.to);
+    const q = v => '"' + String(v == null ? "" : v).replace(/"/g, '""') + '"';
+    const rows = [["section", "line", "amount"].join(",")];
+    for (const x of yearLines(Y)) rows.push([x.sec, x.label, x.amount].map(q).join(","));
+    for (const m of Y.markets) rows.push(["Markets by takings", m.name + " · " + m.days + " days", m.taken].map(q).join(","));
+    saveOut("stallbook-" + spanFile(RF.from, RF.to) + ".csv", rows.join("\n"), "text/csv");
+  };
+}
+
+/* ============================================================
+   Getting ready: what to bring, and what to pack
+   ============================================================ */
+
+/* -------- what to bring ---------------------------------------
+   Looks at what this market bought last time. With no history at
+   this one, markets of the same type stand in; with none of those,
+   everything you've ever sold. Then adds a margin, because running
+   out at noon costs more than carrying a few spares home.
+   ---------------------------------------------------------------- */
+const BUFFERS = [[1, "What sold"], [1.5, "Half as much again"], [2, "Double it"]];
+const bringBuffer = () => +S.settings.bringBuffer || 1.5;
+
+/* every past selling day that had sales, newest first */
+const soldDays = ids => ids.filter(id => salesOfDay(id).length).sort((a, b) =>
+  ((dayOf(b) || {}).date || "").localeCompare((dayOf(a) || {}).date || ""));
+
+function historyFor(day) {
+  const ev = evOf(day.eventId);
+  const mine = soldDays(daysOfEvent(day.eventId).filter(d => d.id !== day.id).map(d => d.id));
+  if (mine.length) return { ids: mine.slice(0, 4), how: "here", label: "what this market bought before" };
+  if (ev && ev.type) {
+    const kin = soldDays(S.days.filter(d => d.id !== day.id && (evOf(d.eventId) || {}).type === ev.type).map(d => d.id));
+    if (kin.length) return { ids: kin.slice(0, 4), how: "type", label: "other " + ev.type.toLowerCase() + " markets" };
+  }
+  const any = soldDays(S.days.filter(d => d.id !== day.id).map(d => d.id));
+  return any.length ? { ids: any.slice(0, 4), how: "any", label: "every market so far" }
+    : { ids: [], how: "none", label: "nothing to go on yet" };
+}
+
+const bringThings = () => S.items.filter(itemActive).concat(S.materials.filter(m => forSale(m) && isLive(m)));
+/* the same reading the sell tile gives: built from materials means "can make",
+   counted by the piece means "ready on the shelf" */
+const haveOf = thing => {
+  if (!isMaterialSale(thing.id) && thing.stockMode !== "item" && hasRecipe(thing)) {
+    const mk = canMake(thing);
+    return mk === null ? { n: null, made: false } : { n: mk, made: true };
+  }
+  if (isMaterialSale(thing.id) || tracks(thing)) return { n: Math.floor(onHandTotal(thing.id)), made: false };
+  return { n: null, made: false };
+};
+
+function bringPlan(day) {
+  const h = historyFor(day);
+  const per = {};
+  for (const id of h.ids) {
+    for (const s of salesOfDay(id)) for (const l of (s.lines || [])) {
+      const k = l.itemId;
+      per[k] = per[k] || { name: l.name, days: {}, total: 0 };
+      per[k].days[id] = (per[k].days[id] || 0) + l.qty;
+      per[k].total += l.qty;
+    }
+  }
+  const buf = bringBuffer();
+  const rows = bringThings().map(t => {
+    const p = per[t.id];
+    const counts = p ? Object.values(p.days) : [];
+    const avg = counts.length ? p.total / h.ids.length : 0;
+    const best = counts.length ? Math.max(...counts) : 0;
+    const last = counts.length ? (p.days[h.ids[0]] || 0) : 0;
+    const suggest = Math.ceil(avg * buf);
+    const have = haveOf(t);
+    const planned = (day.bring && day.bring[t.id] !== undefined) ? +day.bring[t.id] : suggest;
+    return { thing: t, name: t.name, avg: Math.round(avg * 10) / 10, best, last, suggest, planned,
+      have: have.n, made: have.made, short: have.n === null ? 0 : Math.max(0, planned - have.n) };
+  });
+  rows.sort((a, b) => b.planned - a.planned || b.avg - a.avg || a.name.localeCompare(b.name));
+  return { rows, h };
+}
+
+/* -------- the packing list -------------------------------------
+   One master list — your equipment plus anything else you add —
+   with per-market exceptions. Ticked once on the way out and again
+   on the way home, so the tablecloth doesn't stay on the table.
+   ---------------------------------------------------------------- */
+const PACK_START = ["Float for the tray", "Card reader", "Bags", "Tape", "Bin bag", "Water"];
+const packExtras = () => S.settings.packExtras || PACK_START.map(n => ({ id: "p" + uid(), name: n }));
+
+/* keepAll ignores anything dropped for this market — the way home has to
+   list whatever actually went out, even if it's since been taken off */
+function packItems(ev, day, keepAll) {
+  const off = new Set(keepAll ? [] : ((ev && ev.packOff) || []));
+  const out = [];
+  for (const a of S.assets.filter(x => !x.retired))
+    out.push({ id: "gear:" + a.id, name: a.name + ((+a.qty || 1) > 1 ? " ×" + a.qty : ""), group: a.type || "Equipment", thing: a });
+  for (const e of packExtras()) out.push({ id: e.id, name: e.name, group: "Bits and pieces" });
+  for (const e of ((ev && ev.packAdd) || [])) out.push({ id: e.id, name: e.name, group: "Just this market" });
+  const stock = (day && day.bring) ? Object.entries(day.bring).filter(([, q]) => +q > 0).map(([id, q]) => {
+    const t = sellThing(id);
+    return { id: "stock:" + id, name: (t ? t.name : "Stock") + " ×" + q, group: "What you're selling" };
+  }) : [];
+  return stock.concat(out.filter(x => !off.has(x.id)));
+}
+const packState = day => {
+  day.pack = day.pack || { out: {}, back: {} };
+  return day.pack;
+};
+
+/* only ever one half: "out" is getting ready, "back" is the load-out check */
+function packSheet(dayId, mode) {
+  const day = dayOf(dayId);
+  if (!day) return;
+  const ev = evOf(day.eventId) || {};
+  /* the starting bits are written down the first time, so their ids — and the
+     ticks against them — stay put */
+  if (!S.settings.packExtras) { S.settings.packExtras = packExtras(); saveSettings(); }
+  const view = mode === "back" ? "back" : "out";
+  let showAll = false;
+
+  sheet((view === "back" ? "Coming home" : "Getting ready")
+    + `<span style="display:block;font-family:var(--body);font-weight:600;font-size:15px;color:var(--ink-mute);margin-top:2px">${
+      esc(ev.name || "Market")} · ${esc(fmtDate(day.date, true))}</span>`,
+    '<div id="pkBody"></div>', null, {});
+
+  const tickRow = (it, st, other) => {
+    const on = !!st[it.id];
+    const missed = view === "back" && other[it.id] && !on;
+    return `<button class="inset ${on ? "ticked" : ""}" data-tick="${esc(it.id)}" style="width:100%;text-align:left">
+      <span class="tickbox ${on ? "on" : ""}" aria-hidden="true">${on ? "✓" : ""}</span>
+      <span class="b"><span class="n">${esc(it.name)}</span>
+        ${missed ? '<span class="s" style="color:var(--warn-ink)">was packed — still not back</span>' : ""}</span>
+      ${it.group === "Just this market" || it.id.startsWith("p") ? `<span class="xbtn" data-drop="${esc(it.id)}" aria-label="Take ${esc(it.name)} off">✕</span>` : ""}
+    </button>`;
+  };
+
+  const draw = () => {
+    const plan = bringPlan(day);
+    const st = packState(day);
+    const items = packItems(ev, day, view === "back");
+    const now = view === "out" ? st.out : st.back;
+    const other = view === "out" ? st.back : st.out;
+    const list = view === "back" ? items.filter(i => st.out[i.id]) : items;
+    const done = list.filter(i => now[i.id]).length;
+    const groups = [...new Set(list.map(i => i.group))];
+    const rows = plan.rows.filter(r => showAll || r.planned > 0 || r.avg > 0);
+    const shortRows = plan.rows.filter(r => r.short > 0);
+
+    $("#pkBody").innerHTML = `
+      ${view === "out" ? `
+        <div class="sect" style="margin-top:0">What to bring</div>
+        <p class="note">Worked out from ${esc(plan.h.label)}${plan.h.ids.length ? " · " + plan.h.ids.length + " day" + (plan.h.ids.length === 1 ? "" : "s") : ""}.
+          Change any number and it's remembered for this market day.</p>
+        <div class="seg" style="margin-bottom:12px">
+          ${BUFFERS.map(([v, l]) => `<button data-buf="${v}" aria-selected="${bringBuffer() === v}">${l}</button>`).join("")}
+        </div>
+        ${rows.length ? `<div class="card" style="padding:12px 14px">${rows.map(r => `
+          <div class="inset">
+            <span class="b"><span class="n">${esc(r.name)}</span>
+              <span class="s">${[
+                r.avg ? "usually " + r.avg + " a day" : "never sold at this sort of market",
+                r.best ? "most ever " + r.best : "",
+                r.have === null ? "" : (r.made ? "can make " + r.have : r.have + " ready")
+              ].filter(Boolean).join(" · ")}</span>
+              ${r.short ? `<span class="s" style="color:var(--warn-ink)">${r.made ? "short of materials for " + r.short : "make or buy " + r.short + " more"}</span>` : ""}</span>
+            <input type="number" inputmode="numeric" step="1" min="0" data-bring="${esc(r.thing.id)}"
+              value="${r.planned || ""}" placeholder="0" style="max-width:82px;text-align:right">
+          </div>`).join("")}</div>
+          <button class="tlink" id="pkAll">${showAll ? "Just what usually sells" : "Show everything you sell"}</button>`
+        : `<p class="note">Nothing sold yet anywhere, so there's nothing to go on. Bring what you fancy — after one
+            market this fills itself in.</p>`}
+        ${shortRows.length ? `<p class="note" style="color:var(--warn-ink);margin-top:12px">
+          ${shortRows.length === 1 ? "One thing is" : shortRows.length + " things are"} short of the plan —
+          ${esc(shortRows.slice(0, 3).map(r => r.name).join(", "))}${shortRows.length > 3 ? " and more" : ""}.</p>` : ""}
+      ` : `
+        <p class="note" style="margin-top:0">Everything that went out. Tick it as it goes back in the car — whatever's
+          left unticked is still on the table.</p>`}
+
+      <div class="sect">${view === "out" ? "Pack it" : "Load it back"}</div>
+      <div class="kpi tint" style="margin-bottom:14px"><div class="k">${view === "out" ? "Packed" : "Back in the car"}</div>
+        <div class="v sm">${done} of ${list.length}</div>
+        ${view === "back" && done < list.length ? `<div class="n" style="color:var(--warn-ink)">${
+          esc(list.filter(i => !now[i.id]).slice(0, 4).map(i => i.name).join(", "))}${list.filter(i => !now[i.id]).length > 4 ? " and more" : ""} still out</div>` : ""}</div>
+      ${list.length ? groups.map(gr => `<div class="slabel">${esc(gr)}</div>
+        <div class="card" style="padding:10px 12px">${list.filter(i => i.group === gr).map(i => tickRow(i, now, other)).join("")}</div>`).join("")
+        : `<p class="note">${view === "back" ? "Nothing was ticked on the way out."
+          : "Nothing on the list yet. Your equipment shows up here automatically — add it under <b>Equipment</b> — and anything else goes in below."}</p>`}
+
+      ${view === "out" ? `<div class="slabel">Add to the list</div>
+        <div class="rowf" style="align-items:flex-end">
+          <label class="f" style="margin-bottom:0"><span class="t">Something else to bring</span>
+            <input type="text" id="pkNew" placeholder="Spare pump" autocomplete="off"></label>
+          <button class="btn sec sm" id="pkAdd" style="flex:0 0 auto;width:auto;padding-left:18px;padding-right:18px">Add</button>
+        </div>
+        <div class="togs" style="margin-top:10px"><button class="tog sm" id="pkOnce" aria-pressed="false">Only for this market</button></div>
+        <p class="note" style="margin-top:10px">Ticks are kept per selling day, so next time it starts fresh. Removing
+          something with ✕ only drops it from this market.</p>` : ""}`;
+
+
+    all("[data-buf]").forEach(b => b.onclick = async () => {
+      S.settings.bringBuffer = +b.dataset.buf;
+      delete day.bring;
+      await saveSettings(); await saveDays(); draw();
+    });
+    all("[data-bring]").forEach(inp => inp.onchange = async () => {
+      day.bring = day.bring || {};
+      const v = Math.max(0, Math.floor(+inp.value || 0));
+      day.bring[inp.dataset.bring] = v;
+      await saveDays(); draw();
+    });
+    all("[data-tick]").forEach(b => b.onclick = async e => {
+      if (e.target.dataset && e.target.dataset.drop) return;
+      const k = b.dataset.tick;
+      if (now[k]) delete now[k]; else now[k] = true;
+      await saveDays(); draw();
+    });
+    all("[data-drop]").forEach(b => b.onclick = async e => {
+      e.stopPropagation();
+      const id = b.dataset.drop;
+      const real = evOf(day.eventId);
+      if (real) { real.packOff = (real.packOff || []).concat([id]); await saveEvents(); }
+      draw();
+      toast("Off the list for " + (ev.name || "this market"), "Undo", async () => {
+        if (real) { real.packOff = (real.packOff || []).filter(x => x !== id); await saveEvents(); }
+        draw();
+      });
+    });
+    if ($("#pkAll")) $("#pkAll").onclick = () => { showAll = !showAll; draw(); };
+    if ($("#pkOnce")) $("#pkOnce").onclick = () => {
+      const on = $("#pkOnce").getAttribute("aria-pressed") !== "true";
+      $("#pkOnce").setAttribute("aria-pressed", String(on));
+    };
+    if ($("#pkAdd")) $("#pkAdd").onclick = async () => {
+      const name = $("#pkNew").value.trim();
+      if (!name) { toast("What is it?"); return; }
+      const once = $("#pkOnce").getAttribute("aria-pressed") === "true";
+      const item = { id: "p" + uid(), name };
+      const real = evOf(day.eventId);
+      if (once && real) { real.packAdd = (real.packAdd || []).concat([item]); await saveEvents(); }
+      else { S.settings.packExtras = packExtras().concat([item]); await saveSettings(); }
+      draw();
+      toast(name + " added");
+    };
+  };
+  draw();
+}
+
+/* the next day worth packing for: today's, else the next one coming */
+function packDayFor(app) {
+  const ds = daysOfApp(app.id);
+  return (ds.find(d => daysUntil(d.date) === 0) || ds.find(d => daysUntil(d.date) > 0) || ds[ds.length - 1] || null);
+}
+
+/* ============================================================
+   Photos: big on the card, and framed the way you want them
+   ============================================================ */
+
+/* the square the cards show, plus the whole picture behind it so the
+   framing can be changed later without going back to the camera */
+function shrinkTo(file, max, q) {
+  return new Promise(res => {
+    const r = new FileReader();
+    r.onload = () => {
+      const img = new Image();
+      img.onload = () => {
+        const sc = Math.min(1, max / Math.max(img.width, img.height));
+        const c = document.createElement("canvas");
+        c.width = Math.round(img.width * sc); c.height = Math.round(img.height * sc);
+        c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+        res(c.toDataURL("image/jpeg", q));
+      };
+      img.onerror = () => res("");
+      img.src = r.result;
+    };
+    r.onerror = () => res("");
+    r.readAsDataURL(file);
+  });
+}
+
+/* the photo row used by every editor: preview, pick, frame, remove */
+function photoField(obj, p) {
+  return `<label class="f"><span class="t">Photo</span>
+    <div class="photorow">
+      <span class="photoprev ${obj.photo ? "" : "empty"}" id="${p}Prev"
+        ${obj.photo ? `style="background-image:url('${obj.photo}')"` : ""}>${obj.photo ? "" : ICON_PHOTO}</span>
+      <span class="photobtns">
+        <button class="btn sec sm auto" id="${p}Pick">${obj.photo ? "Change it" : "Add a photo"}</button>
+        <button class="btn sec sm auto" id="${p}Adjust" ${obj.photo ? "" : "hidden"}>Frame it</button>
+        <button class="xbtn" id="${p}ClearPhoto" aria-label="Remove photo" ${obj.photo ? "" : "hidden"}>✕</button>
+      </span>
+      <input type="file" id="${p}File" accept="image/*" class="offscreen">
+    </div>
+    <span class="note" style="margin:6px 0 0">Tap the picture to move or zoom what shows on the card.</span>
+  </label>`;
+}
+
+function wirePhoto(obj, p) {
+  const prev = $("#" + p + "Prev"), file = $("#" + p + "File");
+  const clr = $("#" + p + "ClearPhoto"), adj = $("#" + p + "Adjust"), pick = $("#" + p + "Pick");
+  if (!prev) return;
+  const show = () => {
+    prev.style.backgroundImage = obj.photo ? `url('${obj.photo}')` : "";
+    prev.classList.toggle("empty", !obj.photo);
+    prev.innerHTML = obj.photo ? "" : ICON_PHOTO;
+    if (adj) adj.hidden = !obj.photo;
+    if (clr) clr.hidden = !obj.photo;
+    if (pick) pick.textContent = obj.photo ? "Change it" : "Add a photo";
+  };
+  const adjust = async () => {
+    if (!obj.photo) return;
+    /* photos taken before framing existed have no original: their square
+       becomes the whole picture the first time they're adjusted */
+    const src = obj.photoFull || obj.photo;
+    const r = await framePhoto(src, obj.photoFull ? obj.photoFrame : null);
+    if (!r) return;
+    obj.photoFull = src; obj.photo = r.photo; obj.photoFrame = r.frame;
+    show();
+  };
+  prev.onclick = e => { e.preventDefault(); if (obj.photo) adjust(); else file.click(); };
+  if (pick) pick.onclick = e => { e.preventDefault(); file.click(); };
+  if (adj) adj.onclick = e => { e.preventDefault(); adjust(); };
+  if (clr) clr.onclick = e => {
+    e.preventDefault();
+    obj.photo = ""; delete obj.photoFull; delete obj.photoFrame; show();
+  };
+  if (file) file.onchange = async e => {
+    const f = e.target.files[0];
+    e.target.value = "";          // so the same picture can be picked twice
+    if (!f) return;
+    const full = await shrinkTo(f, 1200, 0.82);
+    if (!full) { toast("That picture wouldn't open — try a JPEG or PNG"); return; }
+    const r = await framePhoto(full, null);
+    if (!r) return;               // cancelled: whatever was there stays
+    obj.photoFull = full; obj.photo = r.photo; obj.photoFrame = r.frame;
+    show();
+  };
+  show();
+}
+
+const framePhoto = (src, frame) => new Promise(resolve => {
+  const img = new Image();
+  img.onerror = () => resolve(null);
+  img.onload = () => openFramer(img, frame, resolve);
+  img.src = src;
+});
+
+/* drag to move, pinch or slide to zoom. The frame is kept as a zoom and a
+   centre point, both relative, so the same numbers work at any size. */
+function openFramer(img, frame, resolve) {
+  const W = img.naturalWidth || img.width, H = img.naturalHeight || img.height;
+  const MAXZ = 5, OUT = 600;
+  let f = Object.assign({ z: 1, cx: 0.5, cy: 0.5 }, frame || {});
+  let showAll = false;
+
+  const host = document.createElement("div");
+  host.className = "scrim confirm framer";
+  host.innerHTML = `<div class="sheet narrow" role="dialog" aria-modal="true" aria-label="Frame the photo">
+    <div class="shead"><h3>Frame the photo</h3>
+      <button class="pebble lg" data-x aria-label="Cancel">${ICON.close}</button></div>
+    <div class="sbody">
+      <div class="framebox"><img alt="" draggable="false"></div>
+      <div class="framezoom">
+        <button class="xbtn" data-zo aria-label="Zoom out">−</button>
+        <input type="range" min="1" max="${MAXZ}" step="0.01" value="${f.z}" aria-label="Zoom">
+        <button class="xbtn" data-zi aria-label="Zoom in">+</button>
+      </div>
+      <p class="note">Drag the picture to move it. Pinch, or use the slider, to zoom.</p>
+      <div class="togs"><button class="tog sm" data-all aria-pressed="false">Show the whole photo</button></div>
+    </div>
+    <div class="sfoot">
+      <button class="btn" data-ok>Use this</button>
+      <button class="btn sec" data-fill>Fill the square</button>
+    </div>
+  </div>`;
+  document.body.appendChild(host);
+
+  const box = host.querySelector(".framebox");
+  const el = host.querySelector(".framebox img");
+  const range = host.querySelector('input[type="range"]');
+  el.src = img.src;
+
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const place = () => {
+    const side = box.clientWidth || 300;
+    if (showAll) {
+      /* the whole picture inside the square, letterboxed */
+      const sc = side / Math.max(W, H);
+      el.style.width = W * sc + "px"; el.style.height = H * sc + "px";
+      el.style.left = (side - W * sc) / 2 + "px";
+      el.style.top = (side - H * sc) / 2 + "px";
+      return;
+    }
+    const base = side / Math.min(W, H);
+    const w = W * base * f.z, h = H * base * f.z;
+    f.cx = clamp(f.cx, 0, 1); f.cy = clamp(f.cy, 0, 1);
+    el.style.width = w + "px"; el.style.height = h + "px";
+    el.style.left = clamp(side / 2 - f.cx * w, side - w, 0) + "px";
+    el.style.top = clamp(side / 2 - f.cy * h, side - h, 0) + "px";
+    f.cx = (side / 2 - parseFloat(el.style.left)) / w;
+    f.cy = (side / 2 - parseFloat(el.style.top)) / h;
+    range.value = f.z;
+  };
+  setTimeout(place, 0);
+  addEventListener("resize", place);
+
+  /* dragging and pinching */
+  let drag = null, pinch = null;
+  const pt = e => (e.touches ? e.touches[0] : e);
+  const gap = e => Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
+  const down = e => {
+    if (showAll) return;
+    if (e.touches && e.touches.length === 2) { pinch = { d: gap(e), z: f.z }; return; }
+    const p = pt(e);
+    drag = { x: p.clientX, y: p.clientY, cx: f.cx, cy: f.cy };
+  };
+  const move = e => {
+    if (showAll) return;
+    const side = box.clientWidth || 300, base = side / Math.min(W, H);
+    if (pinch && e.touches && e.touches.length === 2) {
+      e.preventDefault();
+      f.z = clamp(pinch.z * (gap(e) / pinch.d), 1, MAXZ);
+      place(); return;
+    }
+    if (!drag) return;
+    e.preventDefault();
+    const p = pt(e);
+    f.cx = drag.cx - (p.clientX - drag.x) / (W * base * f.z);
+    f.cy = drag.cy - (p.clientY - drag.y) / (H * base * f.z);
+    place();
+  };
+  const up = () => { drag = null; pinch = null; };
+  box.addEventListener("mousedown", down);
+  box.addEventListener("touchstart", down, { passive: true });
+  addEventListener("mousemove", move);
+  box.addEventListener("touchmove", move, { passive: false });
+  addEventListener("mouseup", up);
+  box.addEventListener("touchend", up);
+
+  range.oninput = () => { if (showAll) return; f.z = +range.value; place(); };
+  host.querySelector("[data-zo]").onclick = () => { if (showAll) return; f.z = clamp(f.z - 0.25, 1, MAXZ); place(); };
+  host.querySelector("[data-zi]").onclick = () => { if (showAll) return; f.z = clamp(f.z + 0.25, 1, MAXZ); place(); };
+  host.querySelector("[data-all]").onclick = e => {
+    showAll = !showAll;
+    e.currentTarget.setAttribute("aria-pressed", String(showAll));
+    place();
+  };
+  host.querySelector("[data-fill]").onclick = () => {
+    showAll = false;
+    host.querySelector("[data-all]").setAttribute("aria-pressed", "false");
+    f = { z: 1, cx: 0.5, cy: 0.5 };
+    place();
+  };
+
+  const close = r => {
+    removeEventListener("mousemove", move);
+    removeEventListener("mouseup", up);
+    removeEventListener("resize", place);
+    host.remove();
+    resolve(r);
+  };
+  host.querySelector("[data-x]").onclick = () => close(null);
+  host.addEventListener("click", e => { if (e.target === host) close(null); });
+  host.querySelector("[data-ok]").onclick = () => {
+    const c = document.createElement("canvas");
+    c.width = OUT; c.height = OUT;
+    const ctx = c.getContext("2d");
+    ctx.fillStyle = "#f2ece1"; ctx.fillRect(0, 0, OUT, OUT);
+    if (showAll) {
+      const sc = OUT / Math.max(W, H);
+      ctx.drawImage(img, (OUT - W * sc) / 2, (OUT - H * sc) / 2, W * sc, H * sc);
+    } else {
+      const side = Math.min(W, H) / f.z;              // how much of the picture the square shows
+      const sx = clamp(f.cx * W - side / 2, 0, W - side);
+      const sy = clamp(f.cy * H - side / 2, 0, H - side);
+      ctx.drawImage(img, sx, sy, side, side, 0, 0, OUT, OUT);
+    }
+    close({ photo: c.toDataURL("image/jpeg", 0.82), frame: showAll ? { z: f.z, cx: f.cx, cy: f.cy, all: true } : { z: f.z, cx: f.cx, cy: f.cy } });
+  };
+}

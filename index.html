@@ -106,6 +106,11 @@ h1,h2,h3{margin:0;font-family:var(--display);font-weight:700}
   color:var(--rail-off);
 }
 .takings .v{display:block;font-family:var(--display);font-weight:700;font-size:25px;margin-top:2px}
+/* how the day is going, said in colour alone — no figures for a customer to read */
+.meter{height:54px;border:none;padding:0;transition:background .6s ease}
+.meter.low{background:#b4614f}
+.meter.half{background:#d4a144}
+.meter.on{background:rgba(255,255,255,.07)}
 
 .stage{flex:1;min-width:0;display:flex;flex-direction:column}
 .topbar{
@@ -155,8 +160,10 @@ h1,h2,h3{margin:0;font-family:var(--display);font-weight:700}
 }
 .thumb{flex:0 0 auto;border-radius:20px;background:var(--sand) center/cover no-repeat;box-shadow:inset 0 0 0 1px rgba(0,0,0,.05)}
 .thumb.empty{display:flex;align-items:center;justify-content:center;color:rgba(120,105,85,.4);background:var(--sand);box-shadow:none}
-.tile .thumb.sw{width:72px;height:72px;border-radius:18px}
-.pcard .thumb.sw{width:64px;height:64px;border-radius:16px}
+/* the picture is the point on a card — let it fill the width */
+.tile .thumb.sw{width:100%;height:auto;aspect-ratio:1/1;border-radius:20px}
+.pcard .thumb.sw{width:100%;height:auto;aspect-ratio:1/1;border-radius:16px}
+.tile .thumb.empty svg,.pcard .thumb.empty svg{width:34px;height:34px}
 .shead .thumb.sw{width:54px;height:54px;border-radius:14px}
 .dot{border-radius:50% 50% 50% 38%;box-shadow:var(--sheen);flex:0 0 auto;display:inline-block}
 
@@ -234,13 +241,6 @@ h1,h2,h3{margin:0;font-family:var(--display);font-weight:700}
   display:flex;align-items:center;justify-content:space-between;gap:10px;
   background:var(--green-tint);border-radius:22px;padding:12px 18px;margin-bottom:12px;
 }
-.payhead{display:flex;align-items:center;justify-content:space-between;margin:0 4px 6px}
-.payhead .k{font-size:12px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-mute)}
-.payhead .tlink{padding:4px 12px;font-size:12px}
-.seg.paysel{display:flex;flex-wrap:wrap;width:100%;margin-bottom:10px}
-.seg.paysel button{flex:1 1 0;min-width:70px;padding:10px 8px;font-size:15px}
-.saverow.payfee{color:var(--warn-ink);margin:-2px 4px 10px}
-select.paypick{width:auto;flex:0 0 auto;padding:7px 34px 7px 12px;border-radius:999px;font-size:14px;background-color:var(--card);background-position:right 11px center;background-size:14px}
 .totalblock .k{font-size:12px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--green-dark)}
 .totalblock .v{font-family:var(--display);font-weight:700;font-size:38px;color:var(--green-deep);line-height:1}
 
@@ -285,7 +285,7 @@ select.paypick{width:auto;flex:0 0 auto;padding:7px 34px 7px 12px;border-radius:
 .togs.even{display:grid;grid-template-columns:repeat(auto-fit,minmax(118px,1fr))}
 .togs.even .tog{justify-content:center}
 
-.seg{display:inline-flex;background:var(--sand-2);border-radius:999px;padding:4px;gap:4px}
+.seg{display:inline-flex;flex-wrap:wrap;background:var(--sand-2);border-radius:999px;padding:4px;gap:4px}
 .seg button{
   border-radius:999px;padding:10px 20px;font-family:var(--display);font-weight:700;font-size:16px;
   color:var(--ink-soft);
@@ -382,6 +382,89 @@ select.paypick{width:auto;flex:0 0 auto;padding:7px 34px 7px 12px;border-radius:
 .inset .r{font-family:var(--display);font-weight:700;font-size:17px;flex:0 0 auto}
 .inset .sw{width:40px;height:40px;font-size:15px}
 .inset .tlink{flex:0 0 auto}
+
+.photorow{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.photoprev{
+  flex:0 0 104px;width:104px;height:104px;border-radius:22px;cursor:pointer;
+  background:var(--sand) center/cover no-repeat;display:flex;align-items:center;justify-content:center;
+}
+.photoprev.empty{color:rgba(120,105,85,.4)}
+.photoprev.empty svg{width:34px;height:34px}
+.photobtns{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+
+.framebox{
+  position:relative;width:100%;aspect-ratio:1/1;overflow:hidden;border-radius:24px;
+  background:var(--sand);touch-action:none;user-select:none;-webkit-user-select:none;
+}
+.framebox img{position:absolute;max-width:none;-webkit-user-drag:none;user-select:none}
+.framezoom{display:flex;align-items:center;gap:12px;margin:14px 0 6px}
+.framezoom input[type=range]{flex:1;accent-color:var(--green)}
+
+.rowbtns{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+@media (max-width:420px){.rowbtns{grid-template-columns:1fr}}
+
+.tickbox{
+  flex:0 0 28px;width:28px;height:28px;border-radius:10px;background:var(--sand);
+  display:flex;align-items:center;justify-content:center;
+  font-family:var(--display);font-weight:700;font-size:17px;color:#fff;
+  box-shadow:inset 0 0 0 2px var(--sand-3);
+}
+.tickbox.on{background:var(--green);box-shadow:none}
+.inset.ticked .n{color:var(--ink-mute);text-decoration:line-through}
+.ag .tlink{flex:0 0 auto;align-self:center}
+
+.rcpt{align-items:center}
+.rcptshot{
+  flex:0 0 54px;width:54px;height:54px;border-radius:16px;
+  background:var(--sand) center/cover no-repeat;display:flex;align-items:center;justify-content:center;
+}
+.rcptshot.empty{color:rgba(120,105,85,.4)}
+.rcpt .btn{flex:0 0 auto}
+
+/* ============ paying, change and the tray ============ */
+.payrow{display:grid;grid-template-columns:1fr 1fr auto;gap:10px;margin-bottom:10px}
+.payrow .btn{padding:17px 8px}
+.payrow .btn.sec{padding:17px 20px}
+.duebox{
+  display:flex;align-items:baseline;justify-content:space-between;gap:12px;
+  background:var(--green-tint);border-radius:22px;padding:14px 20px;margin-bottom:6px;
+}
+.duebox .k{font-size:12px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--green-dark)}
+.duebox .v{font-family:var(--display);font-weight:700;font-size:36px;color:var(--green-deep);line-height:1}
+.tender{display:grid;grid-template-columns:repeat(auto-fit,minmax(104px,1fr));gap:10px}
+.tnd{
+  background:var(--sand-2);border-radius:20px;padding:16px 10px;
+  font-family:var(--display);font-weight:700;font-size:21px;color:var(--ink);
+  box-shadow:0 3px 0 var(--sand-3);
+}
+.tnd:active{transform:translateY(2px);box-shadow:0 1px 0 var(--sand-3)}
+.tnd[aria-pressed="true"]{background:var(--green);color:#fff;box-shadow:0 3px 0 var(--green-dark)}
+.changebox{background:var(--paper);border-radius:22px;padding:16px 20px;margin-top:14px;text-align:center}
+.changebox .k{display:block;font-size:12px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-mute)}
+.changebox .v{display:block;font-family:var(--display);font-weight:700;font-size:46px;line-height:1.05;color:var(--green-deep)}
+.changebox .n{display:block;font-size:14px;color:var(--ink-soft);margin-top:6px}
+.changebox.short{background:var(--warn-tint)}
+.changebox.short .v,.changebox.short .k{color:var(--warn-ink)}
+.denoms{display:grid;grid-template-columns:repeat(auto-fit,minmax(112px,1fr));gap:8px;margin:12px 0 4px}
+.dn{display:flex;align-items:center;gap:8px;background:var(--paper);border-radius:16px;padding:6px 10px}
+.dn span{font-size:13px;font-weight:700;color:var(--ink-soft);flex:1;min-width:0}
+.dn input{max-width:64px;text-align:right}
+.trsum{margin-top:12px;font-size:14px;color:var(--ink-soft)}
+.trsum div{display:flex;justify-content:space-between;gap:12px;padding:3px 0}
+.trsum b{font-family:var(--display);font-size:16px;color:var(--ink)}
+.trsum .tot{border-top:1px solid var(--sand-3);margin-top:6px;padding-top:7px;color:var(--ink)}
+.trsum .tot b{font-size:19px;color:var(--green-deep)}
+.netpill{
+  display:flex;align-items:center;gap:8px;flex:0 0 auto;
+  background:var(--card);border-radius:999px;padding:9px 16px;box-shadow:var(--shadow-card);
+  font-size:13px;font-weight:700;color:var(--ink-soft);
+}
+.netpill .nd{width:9px;height:9px;border-radius:50%;background:var(--ink-mute);flex:0 0 auto}
+.netpill.off .nd{background:var(--ink-mute)}
+.netpill.warn{background:var(--warn-tint);color:var(--warn-ink)}
+.netpill.warn .nd{background:var(--warn-ink)}
+.netpill.upd{background:var(--green-tint);color:var(--green-dark)}
+.netpill.upd .nd{background:var(--green)}
 
 /* ============ days ============ */
 .ag{
@@ -635,6 +718,7 @@ select{
 @media (max-height:620px){
   .takings{padding:9px 12px}
   .takings .v{font-size:20px}
+  .meter{height:42px;padding:0}
 }
 @media (prefers-reduced-motion:reduce){
   *{animation:none !important;transition:none !important}
@@ -647,10 +731,11 @@ select{
   <nav class="rail">
     <div class="wordmark"><span class="logo-dot"></span>Stallbook</div>
     <div class="navlist" id="navlist" role="tablist"></div>
-    <div class="takings">
+    <div class="takings hidden" id="dayTakings">
       <span class="k">Today</span>
       <span class="v" id="railTotal">$0.00</span>
     </div>
+    <button class="takings meter hidden" id="dayMeter"></button>
   </nav>
 
   <div class="stage">
@@ -659,6 +744,7 @@ select{
         <div class="kicker" id="kicker">Tap a balloon</div>
         <h1 class="title" id="title">Who's next?</h1>
       </div>
+      <button class="netpill hidden" id="netPill"></button>
       <button class="dayp" id="dayBtn">
         <span class="pin"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#3b6a4c" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21s7-5.3 7-11a7 7 0 1 0-14 0c0 5.7 7 11 7 11z"></path><circle cx="12" cy="10" r="2.5"></circle></svg></span>
         <span class="tx"><span class="k">Selling at</span><span class="v" id="dayVal">Nowhere yet</span></span>

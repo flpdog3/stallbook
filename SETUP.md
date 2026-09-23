@@ -83,8 +83,22 @@ separate storage, so data entered in one won't appear in the other.
 The Sell tab has two views, switched at the top left: **POS** and **Vendor view**.
 
 **POS** is what you use with a customer there: only what's on sale today, grouped by
-what it is, showing nothing but the price. Today's running total is hidden — it's on
-Reports if you want it.
+what it is, showing nothing but the price. Today's running total is hidden.
+
+### Has the day paid for itself?
+
+Low down the left-hand menu, one square says how the day is going, and what it says
+depends on which view you're in. In **Vendor view** it's the running total, **Today
+$84.00**. In **POS**, with a customer leaning over the table, the figure goes and the same
+square answers in colour alone: **red** means less than halfway; **amber**, more than half
+but not there yet; once the day has covered its stall fee and travel it turns the same green
+as the menu and effectively disappears.
+
+It counts what you've kept — takings less sales tax, card fees and what the balloons cost —
+against the stall fee and travel for that visit, split across its days if it runs more than
+one. A market that costs nothing to stand at has nothing to recoup, so the square sits green
+from the start. Tap it for the figures in **Selling at**, or switch to Vendor view for the
+running total.
 
 **Vendor view** is yours. Every product and every material you sell straight, on or off, with
 what you charge, what you keep and the margin under each. Tap a card to set its price and whether it's on sale today, and to work through its
@@ -156,34 +170,71 @@ The original sale stands — you keep that money, and the replacement draws its 
 from stock at its own FIFO cost. Don't also write off the returned one: it was already
 sold and costed, and writing it off would count the same loss twice.
 
+### Something not on the list
+
+The **+ Something else** button sits above the grid, next to POS / Vendor view. It asks a
+price, what to call it, how many, and a note — "Balloon arch, $45, party job".
+
+Under **What it used**, pick the supplies it ate straight from inventory and say how many of
+each. Picking goes in two steps, the way inventory itself is laid out: choose the **type**
+first — Balloons, Ribbon — then the exact one by name, with how many are left shown beside
+it. The type stays put after each pick, so two colours out of the same box go in one after
+the other. Anything already on the list drops out of the choices.
+
+Those come off the shelf when the sale goes through, exactly as a recipe would, so the cost
+is worked out from the batches you actually paid for and the counts stay right. It shows
+what the pick adds up to at what you last paid. Leave it empty and it's just a price with
+nothing behind it.
+
+One-offs show up in Reports under whatever you called them. If the same name keeps
+appearing, that's a hint it deserves a proper tile under **Make**.
+
 ### How they paid
 
-Under the total on every ticket is **Paid by** — Cash, Card or Venmo to start. Pick one
-before **Complete order**. If that way of paying takes a cut, the ticket says so right
-there: "Venmo keeps $0.31 · You get $10.69". Each new ticket starts back on the first one
-(Cash), so a Venmo sale doesn't carry over to the next customer by accident.
+The ticket ends in **Cash**, **Venmo** and **Other**, in place of one Complete order button.
+Card lives behind **Other** until you want it on the ticket — under **Paying & tax**, *On the ticket* picks
+which way of paying sits beside Cash. Which one you tap is stored on the sale, so Reports can show takings split by method and
+the cash tray can be checked at the end of the day. A ticket that comes to nothing — all
+gifts or practice — shows **Complete order** instead and asks nothing.
 
-**Fees** next to it sets what each one keeps — a percent plus a fixed amount per sale.
-Venmo's goods-and-services rate is set to 1.9% + $0.10; put your card reader's rate in
-if it charges one. You can rename them, add more (Cash App, Zelle), or remove one. Each has an
-**On the ticket / Switched off** toggle: switch Card off until you have a reader and it
-disappears from the ticket, keeping its fee and history, then switch it back on when you
-need it. The first one that's switched on is what every ticket starts on. Changing a fee only affects sales from then
-on; past sales keep the rate they were rung up with.
+**Other** lists every other way you've set up — Card, and anything else — and lets you add one
+on the spot: type "Zelle", tap **Add it and use it**, and the sale goes through against it.
 
-The sale still records what the customer paid — that was the price — and keeps the fee
-alongside it. So:
+Sales from before all this existed read as **Not recorded**, and are left out of the cash
+tray sums rather than being assumed to be one thing or the other.
 
-- **Reports → Takings** shows **Payment fees** as its own figure, taken off **Money kept**,
-  and a **How people paid** card with what came in each way and what actually reached you.
-- **Cash flow** counts takings in full and takes **Payment fees** off as their own line, so
-  **In the business now** matches what really arrived.
-- **Done selling for today** splits the day by how people paid, so the Cash line is what
-  should be in the cash box.
-- Tap a date in **Every market day** and each sale has a **Paid by** picker — for fixing
-  one rung up the wrong way. The fee updates to match.
+### Change
 
-Sales from before this existed show as **Not recorded**, with no fee.
+Tapping **Cash** shows what's due and the likely notes — exact money, then the next round
+figures up — plus a box for anything else they hand you. The change appears in large type
+with the notes and coins to count out: "$3.85 · 3 × $1 · 3 × quarters · 1 × dime". **Sold**
+records the sale with what they gave and what went back; **Skip the change** records it
+without. If they haven't handed over enough yet, it says how much is still to come.
+
+Switch the whole thing off under **Paying & tax** if it slows you down.
+
+### Paying & tax
+
+In **Vendor view** at the top of the Sell screen, next to the price switches. Three things
+live there:
+
+- **What it costs you to take the money.** A percent, a few cents a sale, or both, for the
+  card reader and each other way to pay. Fees never change what the customer pays — they
+  come off what you kept, and get their own line in the cash flow.
+- **Change** — the calculator above, on or off.
+- **Sales tax** — off until you switch it on.
+
+With tax on, pick a rate and whether **prices include it** or it's **added at the till**.
+Prices including it is the easier way at a stall: a $6 dog stays $6, and the tax inside it
+is worked out for the reports. Added at the till shows the price, then the tax, then the
+total on the ticket.
+
+Two exceptions are handled. A market in another town or county can carry its own rate —
+set **Sales tax rate here** on the event, and leave it empty everywhere else. And anything
+you don't charge tax on gets **Charge sales tax on it** switched off on its price sheet.
+
+Tax is never counted as yours: **Money taken** is what customers handed over, and **Money
+kept** has the tax and the card fees taken out before anything else.
 
 ## Stock: materials and products
 
@@ -334,15 +385,94 @@ the honest answer to whether to apply again. A fee counts once per event, not on
 
 ## Reports
 
-**Reports** holds four views, switched at the top, all filtered by date:
+**Reports** holds seven views, switched at the top, all filtered by date except the last:
 
 - **Takings** — money taken, what the balloons cost, stalls and travel, what's left, plus
-  every market day, most popular, and was-it-worth-going.
+  how people paid, every market day, most popular, and was-it-worth-going.
+- **Markets** — every event side by side, best first, so you can see which are worth
+  reapplying to.
+- **By hour** — when in the day the money actually comes in.
 - **Written off** — the cost of stock that never sold, grouped by reason, by material and by
   month, with every individual write-off listed.
 - **Material use** — what you've bought over time, how much of it became sales, how much was
   written off, and what's still sitting on the shelf.
+- **Cash tray** — whether the cash added up at the end of each market day.
 - **Cash flow** — money into and out of the business, and what's left in it.
+- **The year** — one page covering a whole calendar year, ready to print or hand over.
+
+### Markets
+
+One row per event, sorted by what was left after everything: takings, less sales tax and
+card fees, less what the balloons cost, less the stall fee and travel. The bar shows the
+size of it; green is a profit, amber a loss.
+
+Fill in **Opens** and **Closes** on an application and that market also gets a figure per
+hour, which is what settles arguments about the long ones. A quiet eight-hour barn sale and
+a busy four-hour fair can take the same money and be nothing alike.
+
+Tap a market to see every visit on its own, each with its full breakdown and whatever you
+wrote in **How it went**. The market search and event-type boxes narrow this view too.
+
+### By hour
+
+Every sale by the hour it was rung up, with the busiest hour, the hours you actually sold
+across, and when half the day's money was in. Where more than one market day is in range,
+**Average market day** divides it out so you see a typical day rather than a total.
+
+It answers practical questions: when to take a break, when to restock, whether the last
+hour earns its keep, and whether arriving earlier would be worth it.
+
+### Equipment: repairs and changes
+
+An equipment card has a **Repairs and changes** list: what was done, what it cost, when, and
+a receipt photo. A new gazebo leg, a re-cover, a paint job. It counts as a running cost
+rather than buying kit again, so it lands in the cash flow as an expense and gets its own
+line on the year page.
+
+### The year
+
+Set the dates at the top — it opens on the year so far — and it lays out the whole thing: what you took, the sales tax inside it, how
+people paid, what the balloons cost, card fees, stall fees, travel, every other expense
+listed one by one, the cash tray over or short, and what was kept from trading. Below that:
+stock and equipment bought, money put in and paid to the two of you, what was in the
+business at the year end, and the markets ranked by takings.
+
+Any range works: a calendar year for the accounts, last quarter for a sanity check, all time
+for the whole picture. **Year to date** and **Last year** are in the range dropdown.
+
+Two things worth understanding before anyone reads it as accounts. **Stock bought** is money
+that went out that year; **what the balloons cost** is what actually went out inside things
+sold, and the two differ by whatever is still on the shelf. **Equipment** sits on its own
+because a gazebo is kit, not a running cost.
+
+**Save it as a page** writes an HTML file — open it and print or save as PDF from the
+share sheet — with every receipt photo from those dates at the bottom. **Spreadsheet**
+writes the same lines as a CSV. It's a summary of your own records, not tax advice.
+
+### The cash tray
+
+Opening a selling day asks what's in the tray to start with. That float is change you
+already had, not money going into the business, so it stays out of the cash flow.
+
+While you're selling, **Out of the tray** on the Selling at pill records anything paid for
+out of the cash box — ice, a bag of cups, lunch money for whoever's on the stall. It comes
+off what the tray should hold and lands in the cash flow as an expense or as money paid to
+one of you.
+
+At close-up, the app works out what should be there:
+
+    float + cash sales − anything paid out of the tray
+
+Type what you counted, or tap **Count it note by note** and enter how many of each note and
+coin — the total fills itself in. It then says **Spot on**, **$2.00 over** or **$3.50
+short**. If you took card payments, there's a box for what the reader says it took, checked
+against the card sales here.
+
+The **Cash tray** report lists every market day with its float, what it should have held and
+what it did, the total over or short across the dates chosen, and which days were never
+counted. Tap any day to count it again or fix the float afterwards. A few cents either way
+is normal; the same shortfall turning up again and again usually means change given wrong,
+or something paid for out of the tray without being written down.
 
 ### Cash flow
 
@@ -360,14 +490,108 @@ What the app can't see is the two of you, so three buttons sit at the top:
 - **Other expense** — anything paid for that isn't stock, equipment or a stall fee:
   insurance, a permit, card-reader fees.
 
+Card and app fees come off on their own line, and any day the tray was over or short shows
+as **Tray over and short**, so the balance matches what the business actually has.
+
 Each entry says who it was from or paid to, so **Each of you** shows what each person put in
 and took out over the dates chosen. **In the business now** is the running balance up to
 today; **From trading** is takings less everything spent, before anything paid to you.
 **Every movement** lists each one with the balance after it — tap anything you entered to
-change or delete it. Takings count every way of paying together, less what Venmo and the like kept, so the
+change or delete it. Takings are what customers handed over, sales tax and all, so the
 balance is what the business has in total, not what's in the cash box.
 
 **Safe → Spreadsheets → Cash flow** exports the full list with a running balance.
+
+## Getting ready for a market
+
+Getting ready happens under **Events**: **Get packed** on a booked card, or **Pack** on a day
+coming up in the **Selling at** picker. The way home looks after itself — tick **Done selling
+for today**, then **Close it up**, and if anything was packed the load-out list comes up on
+its own. Each half opens alone, so there's nothing to switch between mid-market.
+
+### What to bring
+
+The app looks at what this market bought last time — the last four selling days there —
+works out a typical day for each thing you sell, and adds a margin. With no history at this
+market it falls back to other markets of the same type, and failing that to everything
+you've ever sold. The sheet says which it used.
+
+Each line reads "usually 15 a day · most ever 20 · can make 30", so the suggestion is never
+a number out of nowhere. The margin switch at the top offers **What sold**, **Half as much
+again** (the default) and **Double it** — running out at noon costs more than carrying a few
+spares home.
+
+Type over any number and it's remembered for that selling day. Anything you plan to bring
+more of than you have shows in amber: **make or buy 8 more** for things counted by the
+piece, **short of materials for 8** for things built from balloons. That's your to-do list
+for the night before. Things that have never sold at this sort of market sit at zero; **Show
+everything you sell** lists them anyway.
+
+### Pack it
+
+Your equipment appears automatically — everything under **Equipment** that isn't retired —
+along with a starting list of the easily forgotten: float, card reader, bags, tape, bin bag,
+water. Whatever you're bringing to sell appears at the top as its own group, "Dog ×24".
+
+Tick things as they go in the car. Add anything else at the bottom, with **Only for this
+market** if it's a one-off; leave it off and it joins the master list for every market. The
+✕ takes something off for this market alone, so the gazebo can sit out an indoor event
+without vanishing everywhere else.
+
+### Coming home
+
+This half lists everything that went out and nothing else, to be ticked again as it
+goes back in the car. Whatever stays unticked is still on the table — it says so plainly,
+by name. Something you took off the list mid-market still shows here, because it left the
+house either way.
+
+Ticks live on the selling day, so every market starts with a clean list. You don't go
+looking for this half: closing up brings it up by itself, right when you're about to load
+the car. If everything is already ticked back in, it doesn't bother you.
+
+## Receipts
+
+Anywhere money goes out, there's a **Receipt** row with **Add a photo**: recording an
+expense or paying yourselves in the cash flow, a stall fee on an application, stock booking
+in or any batch you add by hand, and equipment — both what you paid for it and anything
+spent on it since. On the iPad that opens the camera, so a receipt can be
+photographed at the stall and filed against the entry then and there.
+
+Photos are shrunk to about 1400 pixels — enough for the small print to stay readable — and
+kept in their own store rather than inside the entries. That matters for backups: an
+ordinary backup stays small enough to email, and under **Safe → Receipts** there's **Save
+the receipts**, which writes every one into a single page with its date, what it was and how
+much, ready to print or file. The year summary carries that year's receipts at the bottom
+of its page.
+
+If you'd rather not think about it, switch **Put them in backups too** on under Safe. Every
+backup then carries the photos — safer, but a much bigger file to send anywhere.
+
+A receipt belongs to its entry. Delete the entry and the photo goes with it; put the entry
+back from **Recently deleted** and the photo comes back too. Photos left over from entries
+that no longer exist are cleared out when the app starts.
+
+## Photos
+
+A photo fills the whole width of its card — on the Sell tiles, and on the Make, Inventory
+and Equipment cards — because at arm's length a thumbnail tells you nothing.
+
+When you pick a photo, **Frame the photo** opens straight away. Drag the picture to move it,
+pinch or use the slider to zoom, and the square you see is the square the card shows.
+**Show the whole photo** zooms out so nothing is cut off, for a wide picture that only makes
+sense entire. **Fill the square** puts it back to the middle.
+
+To change it later, tap the picture in the editor, or the **Frame it** button beside it. The
+full picture is kept behind the square, so re-framing never loses anything — you're always
+working from the original, not from an already-cropped copy.
+
+## Offline
+
+A small pill next to **Selling at** speaks up only when it matters. **Offline** means
+there's no signal — which changes nothing, since selling, stock and reports all run on the
+tablet itself. **New version ready** appears after you've pushed an update to GitHub Pages;
+tap it to load the new one, and everything saved stays as it is. Tap the pill any time for
+what does and doesn't need a signal.
 
 ## Fonts
 
@@ -408,8 +632,11 @@ The list shows "last paid" against each material.
 ### Finishing a day
 
 Tap the **Selling at** pill and whatever's open sits at the top with what it's taken so
-far, plus **Done selling for today**. That shows the day's total, how many things went out
-and how many were given away, warns you if anything is still sitting in the ticket, and
+far, how that splits by payment, and what the tray should hold. **Done selling for today**
+is the full-width button; **Set the float** and **Out of the tray** sit on the row below,
+with the coming-home check under them. While a day is open the "add somewhere else"
+buttons are hidden — you're already selling. That shows the day's total, how many things went out and how many were given
+away, warns you if anything is still sitting in the ticket, counts the cash tray, and
 offers a backup if sales haven't been saved yet.
 
 Closing up only puts the till away: the day is marked **Done**, nothing is deleted, and the
@@ -565,7 +792,8 @@ and your existing data is left alone.
 
 ## Changing the app later
 
-Replace `index.html` on GitHub, **and** open `sw.js` and bump the number in `stallbook-vNN`. Without that bump the iPad keeps serving the cached old version.
+Replace `index.html` on GitHub, **and** open `sw.js` and change `stallbook-v1` to
+`stallbook-v2`. Without that bump the iPad keeps serving the cached old version.
 Then reopen the app twice — once to fetch, once to run the new one.
 
 ## Troubleshooting
