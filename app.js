@@ -2254,9 +2254,9 @@ const ticketOf = id => S.tickets.find(t => t.id === id) || null;
 const cart = () => ensureTicket().lines;
 const setCart = lines => { ensureTicket().lines = lines; };
 const ticketName = (t, i) => t.label || ("Ticket " + (i + 1));
-const ticketSub = t => (t.lines || []).reduce((a, l) => a + unitPrice(l) * l.qty, 0);
+const ticketSub = (t, pay) => (t.lines || []).reduce((a, l) => a + payUnit(l, pay) * l.qty, 0);
 /* what the customer hands over: when tax is added at the till it rides on top */
-const ticketTotal = t => ticketSub(t) + (taxSet().mode === "add" ? ticketTax(t) : 0);
+const ticketTotal = (t, pay) => ticketSub(t, pay) + (taxSet().mode === "add" ? ticketTax(t, pay) : 0);
 const ticketCount = t => (t.lines || []).reduce((a, l) => a + l.qty, 0);
 
 /* ---------------------------- paying and tax ----------------------------
@@ -2289,16 +2289,16 @@ const lineTaxable = l => {
   const th = sellThing(l.itemId);
   return !(th && th.taxFree);
 };
-function lineTaxNow(l, rate, mode) {
-  const amt = unitPrice(l) * l.qty;
+function lineTaxNow(l, rate, mode, pay) {
+  const amt = payUnit(l, pay) * l.qty;
   if (!rate || !amt || !lineTaxable(l)) return 0;
   return r2(mode === "add" ? amt * rate / 100 : amt - amt / (1 + rate / 100));
 }
-function ticketTax(t) {
+function ticketTax(t, pay) {
   const rate = taxRateFor(activeDay());
   if (!rate) return 0;
   const mode = taxSet().mode;
-  return r2((t.lines || []).reduce((a, l) => a + lineTaxNow(l, rate, mode), 0));
+  return r2((t.lines || []).reduce((a, l) => a + lineTaxNow(l, rate, mode, pay), 0));
 }
 const lineTax = l => +l.tax || 0;
 const lineGross = l => (+l.total || 0) + (l.taxMode === "add" ? lineTax(l) : 0);
@@ -2313,14 +2313,21 @@ const PAY_START = [
   { id: "venmo", name: "Venmo", pct: 0, fixed: 0 }
 ];
 const payMethods = () => S.settings.payMethods || PAY_START.map(x => Object.assign({}, x));
-/* the second big button on the ticket; everything else waits behind Other */
+/* A method can be switched off: it stays on record, so old sales still read
+   right, but it isn't offered at the counter. Cash is always on. */
+const payOn = m => !!m && m.active !== false && !!String(m.name || "").trim();
+const activePays = () => payMethods().filter(payOn);
+/* Room for three buttons on the ticket. Cash plus up to two others get a
+   button each; only a fourth way to pay earns an Other button. */
+const payButtonsAll = () => activePays().length <= 2;
+/* the second big button on the ticket when there are too many to show */
 function quickPay() {
-  const ms = payMethods();
+  const ms = activePays();
   return ms.find(m => m.id === S.settings.payQuick) || ms.find(m => m.id === "venmo") || ms[0] || null;
 }
 const payOthers = () => {
   const q = quickPay();
-  return payMethods().filter(m => !q || m.id !== q.id);
+  return activePays().filter(m => !q || m.id !== q.id);
 };
 function payName(id) {
   if (id === "cash") return "Cash";
@@ -2335,6 +2342,62 @@ function feeFor(id, total) {
   return m ? r2(total * (+m.pct || 0) / 100 + (+m.fixed || 0)) : 0;
 }
 const changeCalcOn = () => S.settings.changeCalc !== false;
+/* bumped alongside CACHE in sw.js, so "which one am I running?" has an answer */
+const APP_VER = "46";
+
+/* ---------------------- charging more on some methods -------------------
+   Cash is the price on the tile. A method can cost the customer more —
+   a percent, a few cents a piece, or an exact price you set on the thing
+   itself. Anything sold at a price you typed (a deal, a replacement) gets
+   the same treatment, and anything free stays free.
+   ------------------------------------------------------------------------ */
+const ROUNDINGS = [["none", "Leave it exact"], ["05", "Up to the nearest 5¢"],
+  ["25", "Up to the nearest 25¢"], ["1", "Up to the nearest dollar"]];
+const roundUpTo = (v, how) => {
+  const step = how === "05" ? 0.05 : how === "25" ? 0.25 : how === "1" ? 1 : 0;
+  if (!step) return r2(v);
+  return r2(Math.ceil((v * 100 - 0.5) / (step * 100)) * step);
+};
+const payRule = id => {
+  if (!id || id === "cash" || id === "none") return null;
+  const m = payMethods().find(x => x.id === id);
+  if (!m) return null;
+  const pct = +m.up || 0, each = +m.upEach || 0;
+  return (pct || each || m.round) ? { pct, each, round: m.round || "none", name: m.name, id: m.id } : null;
+};
+/* any method at all charging a different price? decides whether the extra
+   prices are worth showing on tiles and price sheets */
+const pricesVary = () => activePays().some(m => (+m.up || 0) || (+m.upEach || 0));
+const payOwn = (thing, id) => {
+  const own = thing && thing.payPrice && thing.payPrice[id];
+  return own === undefined || own === null || own === "" ? null : Math.max(0, +own || 0);
+};
+/* the price of one of these, paid this way */
+function payUnit(l, pay) {
+  const u = unitPrice(l);
+  if (!u || !pay || pay === "cash" || pay === "none") return u;
+  const rule = payRule(pay);
+  if (!rule) return u;
+  /* an exact price set on the thing wins, but only at its ordinary price —
+     a deal or a typed price still works off what was actually rung up */
+  if (l.mode !== "discount" && l.mode !== "set" && l.mode !== "replace") {
+    const own = payOwn(l.custom ? null : sellThing(l.itemId), pay);
+    if (own !== null && u === l.base) return own;
+  }
+  return roundUpTo(u * (1 + rule.pct / 100) + rule.each, rule.round);
+}
+/* what one of these costs each way, for a tile or a price sheet */
+function priceEachWay(thing, base) {
+  const out = [];
+  for (const m of activePays()) {
+    const rule = payRule(m.id);
+    if (!rule) continue;
+    const own = payOwn(thing, m.id);
+    const p = own !== null ? own : roundUpTo(base * (1 + rule.pct / 100) + rule.each, rule.round);
+    if (r2(p) !== r2(base)) out.push({ id: m.id, name: m.name, price: r2(p) });
+  }
+  return out;
+}
 /* "the cart" is whatever the open ticket is holding */
 Object.defineProperty(S, "cart", {
   get: () => cart(),
@@ -2391,12 +2454,20 @@ function sellCard(thing, isMat) {
   const left = isMat ? onHandTotal(thing.id) : null;
   const off = vend && (isMat ? !forSale(thing) : !itemActive(thing));
   const mg = marginOf(thing);
-  return `<div class="tile ${off ? "off" : ""}">
-    <button class="tilehit" data-sell="${thing.id}">
+  /* the whole card is the button: picture, name, price and the small print
+     under it all do the same thing. Only On sale / Off today does its own. */
+  return `<div class="tile ${off ? "off" : ""}" data-sell="${thing.id}" role="button" tabindex="0"
+      aria-label="${esc(thing.name)}${vend ? " — change its price" : ""}">
+    <span class="tilehit">
       ${thumb(thing, "sw", true)}
       <span class="nm">${esc(thing.name)}</span>
-    </button>
-    <button class="pp" data-price="${thing.id}">${price ? esc(cur(price)) : "Set price"}</button>
+    </span>
+    <span class="pp">${price ? esc(cur(price)) : (vend ? "Set price" : "—")}</span>
+    ${price ? (() => {
+      /* what it costs the other ways, so nobody has to work it out at the table */
+      const ways = priceEachWay(thing, price);
+      return ways.length ? `<span class="sl">${ways.map(w => esc(cur(w.price)) + " " + esc(w.name)).join(" · ")}</span>` : "";
+    })() : ""}
     ${vend ? `<span class="sl">${price
         ? esc(cur(mg.profit)) + " kept · " + mg.pct + "%"
         : "costs " + esc(cur(mg.cost))}</span>
@@ -2446,10 +2517,6 @@ function renderGrid() {
 
   bindMode();
 
-  g.querySelectorAll("[data-price]").forEach(b => b.onclick = ev => {
-    ev.stopPropagation();
-    priceSheet(sellThing(b.dataset.price));
-  });
   g.querySelectorAll("[data-onoff]").forEach(b => b.onclick = async ev => {
     ev.stopPropagation();
     const t = sellThing(b.dataset.onoff);
@@ -2457,10 +2524,14 @@ function renderGrid() {
     else { t.active = !itemActive(t); await saveItems(); }
     renderGrid();
   });
-  g.querySelectorAll("[data-sell]").forEach(b => b.onclick = () => {
+  g.querySelectorAll("[data-sell]").forEach(b => b.onkeydown = e => {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); b.click(); }
+  });
+  g.querySelectorAll("[data-sell]").forEach(b => b.onclick = e => {
+    if (e.target.closest("[data-onoff]")) return;
     const t = sellThing(b.dataset.sell);
     if (vendorMode()) { priceSheet(t); return; }
-    const tile = b.closest(".tile");
+    const tile = b;
     tile.classList.remove("pop");
     void tile.offsetWidth;
     tile.classList.add("pop");
@@ -2490,8 +2561,16 @@ function priceSheet(it) {
     <div class="shead" style="padding:0 0 10px">
       ${thumb(it, "sw")}
       <h3 style="font-size:22px">${esc(it.name)}</h3></div>
-    <label class="f"><span class="t">Price</span>
+    <label class="f"><span class="t">Price${pricesVary() ? " · cash" : ""}</span>
       <input type="number" id="pxVal" inputmode="decimal" step="0.01" min="0" value="${it.price || ""}" placeholder="6.00"></label>
+    ${pricesVary() ? `<div class="rowf" id="pxWays">
+      ${activePays().filter(m => payRule(m.id)).map(m => `<label class="f"><span class="t">${esc(m.name)}</span>
+        <input type="number" data-px-way="${esc(m.id)}" inputmode="decimal" step="0.01" min="0"
+          value="${payOwn(it, m.id) === null ? "" : payOwn(it, m.id)}"
+          placeholder="${(+it.price || 0) ? cur(roundUpTo((+it.price || 0) * (1 + (+m.up || 0) / 100) + (+m.upEach || 0), m.round || "none")).replace("$", "") : "auto"}"></label>`).join("")}
+    </div>
+    <p class="note" style="margin-top:-4px">Leave these empty and they follow the rule you set under Paying &amp; tax.
+      Type one in to charge an exact price that way.</p>` : ""}
     <div class="kpis" style="margin-bottom:14px">
       <div class="kpi"><div class="k">Costs to make</div><div class="v sm">${esc(cur(mg.cost))}</div></div>
       <div class="kpi tint"><div class="k">You keep</div><div class="v sm" id="pxKeep">—</div></div>
@@ -2540,6 +2619,12 @@ function priceSheet(it) {
   };
   $("#pxGo").onclick = async () => {
     it.price = +$("#pxVal").value || 0;
+    all("[data-px-way]").forEach(inp => {
+      const id = inp.dataset.pxWay, v = inp.value.trim();
+      if (v === "") { if (it.payPrice) delete it.payPrice[id]; }
+      else { it.payPrice = it.payPrice || {}; it.payPrice[id] = Math.max(0, +v || 0); }
+    });
+    if (it.payPrice && !Object.keys(it.payPrice).length) delete it.payPrice;
     if ($("#pxTax")) {
       if ($("#pxTax").getAttribute("aria-pressed") === "true") delete it.taxFree;
       else it.taxFree = true;
@@ -2653,7 +2738,10 @@ function lineSheet(item, existing) {
                 ? `<p class="note">None of your ${esc(rl.category)} came to this market, or they're all used up.</p>`
                 : `<p class="note">Nothing in "${esc(rl.category)}" yet — add some under Inventory.</p>`)}
           </div>
-          ${hiddenCount > 0 ? `<button class="btn ghost" data-showall="1" style="margin-top:0">${showAll ? "Just what I brought" : "Show " + hiddenCount + " I didn't bring"}</button>` : ""}`;
+          ${hiddenCount > 0 && (vendorMode() || showAll || !options.length)
+            /* at the counter you only get this offered when the short list is
+               empty — otherwise it's a colour you can't hand over anyway */
+            ? `<button class="btn ghost" data-showall="1" style="margin-top:0">${showAll ? "Just what I brought" : "Show " + hiddenCount + " I didn't bring"}</button>` : ""}`;
       }).join("")}
       ${(() => {
         if (!hasRecipe(item)) return "";
@@ -2945,11 +3033,21 @@ function renderTicket() {
         ${tax && !addTax ? `<div class="saverow" style="margin-top:-4px"><span>Includes sales tax</span><span>${esc(cur(tax))}</span></div>` : ""}
         ${t.lines.length && total <= 0
           ? '<button class="btn" id="completeBtn">Complete order</button>'
-          : `<div class="payrow">
-              <button class="btn" id="payCash">Cash</button>
-              ${quickPay() ? `<button class="btn" id="payQuick">${esc(quickPay().name)}</button>` : ""}
-              <button class="btn sec" id="payOther" aria-label="Another way to pay">Other</button>
-            </div>`}
+          : (() => {
+            const label = (name, amt) => amt === null || r2(amt) === r2(total)
+              ? esc(name)
+              : `${esc(name)}<span style="display:block;font-size:15px;font-weight:600;opacity:.85;margin-top:1px">${esc(cur(amt))}</span>`;
+            /* three or fewer ways to pay: one button each. Four or more: Cash,
+               the one you picked, and Other for the rest. */
+            const shown = payButtonsAll() ? activePays() : [quickPay()].filter(Boolean);
+            const other = !payButtonsAll();
+            const cols = 1 + shown.length;
+            return `<div class="payrow" style="grid-template-columns:${"minmax(0,1fr) ".repeat(cols).trim()}${other ? " minmax(0,.8fr)" : ""}">
+              <button class="btn" id="payCash">${label("Cash", null)}</button>
+              ${shown.map(m => `<button class="btn" data-payway="${esc(m.id)}">${label(m.name, r2(ticketTotal(t, m.id)))}</button>`).join("")}
+              ${other ? '<button class="btn sec" id="payOther" aria-label="Another way to pay">Other</button>' : ""}
+            </div>`;
+          })()}
         <button class="btn ghost" id="clearBtn">Start over</button>
       </div>
     </div>
@@ -3032,7 +3130,7 @@ function bindTicketFoot() {
     if (!ready()) return;
     if (changeCalcOn()) changeSheet(); else completeOrder("cash");
   };
-  if ($("#payQuick")) $("#payQuick").onclick = () => { if (ready()) completeOrder(quickPay().id); };
+  all("[data-payway]").forEach(b => b.onclick = () => { if (ready()) completeOrder(b.dataset.payway); });
   if ($("#payOther")) $("#payOther").onclick = () => { if (ready()) otherPaySheet(); };
 }
 async function completeOrder(pay, cashInfo) {
@@ -3041,21 +3139,27 @@ async function completeOrder(pay, cashInfo) {
   if (!d) { dayPicker(); return; }
   let drew = false, shortOf = [];
   const taxRate = taxRateFor(d), taxMode = taxSet().mode;
+  /* the price is settled the moment they say how they're paying */
+  const how = pay || (ticketTotal(ticketOf(S.activeTicket) || { lines: cart() }) > 0 ? "cash" : "none");
   const sale = {
     id: uid(), dayId: d.id, ts: Date.now(),
     lines: cart().map(l => {
-      const u = unitPrice(l);
+      const u = payUnit(l, how);
+      const cashU = unitPrice(l);
+      const listU = u === cashU ? l.base : payUnit({ ...l, mode: "full" }, how);
       const opts = l.opts.filter(x => x.o);
       const item = S.items.find(i => i.id === l.itemId);
       const line = {
         itemId: l.itemId, name: l.name, opts, qty: l.qty, base: l.base, unit: u,
         cost: +l.unitCost || 0, mode: l.mode, dType: l.dType, dVal: +l.dVal || 0, reason: l.reason || "",
-        total: u * l.qty, listed: l.base * l.qty,
+        total: u * l.qty, listed: listU * l.qty,
         costTotal: (+l.unitCost || 0) * l.qty, draw: [], used: [], short: 0,
         picks: l.picks || {}
       };
       if (l.custom) { line.custom = true; line.note = l.note || ""; if (l.taxFree) line.taxFree = true; }
-      const tax = lineTaxNow(l, taxRate, taxMode);
+      /* what the method added, kept so a reversal or a report can tell */
+      if (u !== cashU) { line.cashUnit = cashU; line.up = r2((u - cashU) * l.qty); }
+      const tax = lineTaxNow(l, taxRate, taxMode, how);
       if (tax) { line.tax = tax; line.taxMode = taxMode; line.taxRate = taxRate; }
       const asMaterial = isMaterialSale(l.itemId) ? matById(l.itemId) : null;
       if (l.custom && (l.uses || []).length) {
@@ -3108,8 +3212,10 @@ async function completeOrder(pay, cashInfo) {
   };
   sale.total = r2(sale.lines.reduce((a, l) => a + lineGross(l), 0));
   sale.tax = r2(sale.lines.reduce((a, l) => a + lineTax(l), 0));
-  sale.pay = sale.total > 0 ? (pay || "cash") : "none";
+  sale.pay = sale.total > 0 ? how : "none";
   sale.payName = payName(sale.pay);
+  const up = r2(sale.lines.reduce((a, l) => a + (+l.up || 0), 0));
+  if (up) sale.up = up;
   sale.fee = feeFor(sale.pay, sale.total);
   if (sale.pay === "cash" && cashInfo && cashInfo.tendered != null) {
     sale.tendered = r2(cashInfo.tendered);
@@ -5335,6 +5441,18 @@ function renderData() {
       </div>
 
       <div class="card" style="border-radius:28px">
+        <div class="sect" style="margin-top:0">This copy</div>
+        <div class="inset">
+          <span class="b"><span class="n">Stallbook v${esc(APP_VER)}</span>
+            <span class="s" id="verNote">installed on this tablet</span></span>
+          <button class="btn sec sm auto" id="verCheck">Check for an update</button>
+        </div>
+        <p class="note" style="margin:10px 0 0">If something a note or a message says should be here isn't, check this
+          number first. A new version only arrives once the tablet has fetched it — tap above with a signal, then open
+          the app again.</p>
+      </div>
+
+      <div class="card" style="border-radius:28px">
         <div class="sect" style="margin-top:0">Receipts</div>
         <p class="note">${(() => {
           const n = receiptsList().length;
@@ -5391,6 +5509,28 @@ function renderData() {
     });
   });
   $("#expJson").onclick = doBackup;
+  if ($("#verCheck")) $("#verCheck").onclick = async () => {
+    const note = $("#verNote");
+    if (!navigator.serviceWorker || !navigator.serviceWorker.getRegistration) {
+      note.textContent = "running straight from the web, nothing cached";
+      return;
+    }
+    note.textContent = "looking…";
+    try {
+      const reg = await navigator.serviceWorker.getRegistration();
+      if (!reg) { note.textContent = "not installed for offline use yet"; return; }
+      await reg.update();
+      /* the browser only tells us there's a new one by starting to install it */
+      setTimeout(() => {
+        if (reg.installing || reg.waiting || NET.update) {
+          NET.update = true; renderNet();
+          note.textContent = "a newer version is ready — tap the pill at the top";
+        } else {
+          note.textContent = NET.online ? "this is the newest version" : "no signal, so nothing to check against";
+        }
+      }, 1500);
+    } catch (e) { note.textContent = "couldn't check just now"; }
+  };
   $("#expRcpt").onclick = exportReceipts;
   $("#bkPhotos").onclick = async () => {
     S.settings.backupPhotos = !S.settings.backupPhotos;
@@ -6284,6 +6424,18 @@ function changeSheet() {
     <label class="f" style="margin-top:14px"><span class="t">Or type what they gave you</span>
       <input type="number" id="tnOwn" inputmode="decimal" step="0.01" min="0" placeholder="${total.toFixed(2)}"></label>
     <div id="tnRes"></div>
+    ${(() => {
+      /* they've changed their mind at the last second — nothing comes off the
+         ticket, the price just settles the other way */
+      const ways = activePays();
+      if (!ways.length) return "";
+      return `<div class="slabel" style="margin-top:20px">Changed their mind?</div>
+        <div class="togs">${ways.map(m => {
+          const amt = r2(ticketTotal(t, m.id));
+          return `<button class="tog sm" data-swap="${esc(m.id)}">${esc(m.name)}${
+            amt === total ? "" : `<span class="d">${esc(cur(amt))}</span>`}</button>`;
+        }).join("")}</div>`;
+    })()}
   `, [
     { label: "Sold", cls: "btn", id: "tnGo" },
     { label: "Skip the change", cls: "btn sec", id: "tnSkip" }
@@ -6326,14 +6478,21 @@ function changeSheet() {
   };
   $("#tnGo").onclick = () => { closeSheet(); completeOrder("cash", tender === null ? null : { tendered: tender }); };
   $("#tnSkip").onclick = () => { closeSheet(); completeOrder("cash"); };
+  all("[data-swap]").forEach(b => b.onclick = () => { closeSheet(); completeOrder(b.dataset.swap); });
 }
 
 /* -------- anything other than cash or card -------- */
 function otherPaySheet() {
   const others = payOthers();
+  const t = ticketOf(S.activeTicket) || { lines: cart() };
+  const cash = r2(ticketTotal(t, "cash"));
   sheet("How did they pay?", `
     ${others.length ? `<div class="togs even" style="margin-bottom:16px">
-        ${others.map(m => `<button class="tog" data-pm="${esc(m.id)}">${esc(m.name)}</button>`).join("")}
+        ${others.map(m => {
+          const amt = r2(ticketTotal(t, m.id));
+          return `<button class="tog" data-pm="${esc(m.id)}">${esc(m.name)}${
+            amt === cash ? "" : `<span class="d">${esc(cur(amt))}</span>`}</button>`;
+        }).join("")}
       </div>`
       : `<p class="note">Nothing else set up yet. Add the other ways people pay you — Zelle, Cash App, whatever it is.</p>`}
     <div class="slabel">Add a way to pay</div>
@@ -6346,7 +6505,19 @@ function otherPaySheet() {
   $("#pmAdd").onclick = async () => {
     const name = $("#pmName").value.trim();
     if (!name) { toast("Give it a name first"); return; }
-    const m = { id: uid(), name, pct: 0, fixed: 0 };
+    /* cash is built in and already has its own button — a second one called
+       Cash would split the takings and throw the tray count out */
+    if (name.toLowerCase() === "cash") { toast("Cash is already there, on its own button"); return; }
+    const same = payMethods().find(m => m.name.trim().toLowerCase() === name.toLowerCase());
+    if (same && payOn(same)) { toast(name + " is already set up"); return; }
+    if (same) {
+      /* it was switched off — switch it back on rather than making a twin */
+      same.active = true;
+      await saveSettings();
+      closeSheet(); completeOrder(same.id);
+      return;
+    }
+    const m = { id: uid(), name, pct: 0, fixed: 0, up: 0, upEach: 0, round: "none" };
     S.settings.payMethods = payMethods().concat([m]);
     await saveSettings();
     closeSheet(); completeOrder(m.id);
@@ -6737,36 +6908,97 @@ function payTaxSheet() {
       const pct = document.querySelector(`[data-pm-pct="${m.id}"]`);
       const fx = document.querySelector(`[data-pm-fixed="${m.id}"]`);
       const nm = document.querySelector(`[data-pm-name="${m.id}"]`);
+      const up = document.querySelector(`[data-pm-up="${m.id}"]`);
+      const ue = document.querySelector(`[data-pm-upeach="${m.id}"]`);
+      const rd = document.querySelector(`[data-pm-round="${m.id}"]`);
       if (pct) m.pct = +pct.value || 0;
       if (fx) m.fixed = +fx.value || 0;
       if (nm) m.name = nm.value.trim() || m.name;
+      if (up) m.up = +up.value || 0;
+      if (ue) m.upEach = +ue.value || 0;
+      if (rd) m.round = rd.value;
     });
     if ($("#ptRate")) draft.tax.rate = Math.max(0, +$("#ptRate").value || 0);
   };
 
-  const feeRow = m => `<div class="inset">
-      ${m.id === "card" ? `<span class="b"><span class="n">Card</span>
-        <span class="s">the reader's cut</span></span>`
-      : `<span class="b"><input type="text" data-pm-name="${esc(m.id)}" value="${esc(m.name)}" style="max-width:150px"></span>`}
-      <input type="number" data-pm-pct="${esc(m.id)}" inputmode="decimal" step="0.01" min="0"
-        value="${m.pct || ""}" placeholder="%" aria-label="Percent" style="max-width:88px;text-align:right">
-      <input type="number" data-pm-fixed="${esc(m.id)}" inputmode="decimal" step="0.01" min="0"
-        value="${m.fixed || ""}" placeholder="+ $" aria-label="Plus each sale" style="max-width:88px;text-align:right">
-      ${m.id === "card" ? "" : `<button class="xbtn" data-pm-del="${esc(m.id)}" aria-label="Remove ${esc(m.name)}">✕</button>`}
+  /* The one question per way to pay: who carries the fee? What the customer
+     pays extra sits right beside what it costs you, with a $10 sale worked
+     through underneath so the answer is in plain sight. */
+  const SAMPLE = 10;
+  const verdict = m => {
+    const pays = roundUpTo(SAMPLE * (1 + (+m.up || 0) / 100) + (+m.upEach || 0), m.round || "none");
+    const fee = r2(pays * (+m.pct || 0) / 100 + (+m.fixed || 0));
+    const extra = r2(pays - SAMPLE), keep = r2(pays - fee);
+    let word, tone = "";
+    if (fee < 0.005) word = extra > 0.004 ? "No fee, so the extra is all yours" : "No fee either way";
+    else if (extra < 0.005) { word = "You eat the whole fee"; tone = "warn"; }
+    else if (extra >= fee - 0.004) { word = extra > fee + 0.004 ? "The customer covers it, and a bit more" : "The customer covers it"; tone = "good"; }
+    else word = "The customer covers " + cur(extra) + " of the " + cur(fee) + " fee";
+    return `A ${cur(SAMPLE)} sale: they pay <b>${esc(cur(pays))}</b> · fee ${esc(cur(fee))} · you keep <b>${esc(cur(keep))}</b>
+      <span class="fact ${tone}" style="display:inline-block;margin-left:4px;padding:3px 10px">${esc(word)}</span>`;
+  };
+
+  const methodRow = m => {
+    const on = m.active !== false;
+    const head = `<div class="pwhead">
+        ${m.id === "card" ? `<span class="n">Card</span>`
+          : `<input type="text" data-pm-name="${esc(m.id)}" value="${esc(m.name)}" placeholder="Zelle" style="max-width:170px">`}
+        <span style="flex:1"></span>
+        <button class="tog sm" data-pm-on="${esc(m.id)}" aria-pressed="${on}" style="padding:6px 14px;font-size:13px">${on ? "On" : "Off"}</button>
+        ${m.id === "card" ? "" : `<button class="xbtn" data-pm-del="${esc(m.id)}" aria-label="Remove ${esc(m.name || "this one")}">✕</button>`}
+      </div>`;
+    if (!on) return `<div class="grp pw off">${head}
+      <p class="note" style="margin:6px 0 0">Switched off — not offered at the counter. Past sales keep it.</p></div>`;
+    return `<div class="grp pw">${head}
+      <div class="pwcols">
+        <div class="pwcol">
+          <span class="t">Customer pays extra</span>
+          <div class="pwin">
+<label class="pwf"><input type="number" data-pm-up="${esc(m.id)}" inputmode="decimal" step="0.1" min="0"
+              value="${m.up || ""}" placeholder="+ %" aria-label="Percent more than cash"><span>% more</span></label>
+<label class="pwf"><input type="number" data-pm-upeach="${esc(m.id)}" inputmode="decimal" step="0.01" min="0"
+              value="${m.upEach || ""}" placeholder="+ $ each" aria-label="Amount more on each thing"><span>$ more each</span></label>
+          </div>
+          <select data-pm-round="${esc(m.id)}">
+            ${ROUNDINGS.map(([v, l]) => `<option value="${v}"${(m.round || "none") === v ? " selected" : ""}>${l}</option>`).join("")}
+          </select>
+        </div>
+        <div class="pwcol">
+          <span class="t">It costs you</span>
+          <div class="pwin">
+<label class="pwf"><input type="number" data-pm-pct="${esc(m.id)}" inputmode="decimal" step="0.01" min="0"
+              value="${m.pct || ""}" placeholder="%" aria-label="Fee percent"><span>% fee</span></label>
+<label class="pwf"><input type="number" data-pm-fixed="${esc(m.id)}" inputmode="decimal" step="0.01" min="0"
+              value="${m.fixed || ""}" placeholder="+ $ a sale" aria-label="Fee per sale"><span>$ a sale</span></label>
+          </div>
+          <span class="s">${m.id === "card" ? "the reader's cut" : "what the app or bank takes"}</span>
+        </div>
+      </div>
+      <p class="pwsum" data-pm-sum="${esc(m.id)}">${verdict(m)}</p>
     </div>`;
+  };
 
   const draw = () => {
+    const live = draft.methods.filter(m => m.active !== false && m.name.trim());
+    if (live.length > 2 && !live.some(m => m.id === draft.quick)) draft.quick = live[0].id;
     $("#ptBody").innerHTML = `
-      <div class="sect" style="margin-top:0">What it costs you to take the money</div>
-      <p class="note">A percent, a few cents a sale, or both. Fees come off what you kept — they never change what the
-        customer pays.</p>
-      <div class="card" style="padding:12px 14px">${draft.methods.map(feeRow).join("")}</div>
+      <div class="sect" style="margin-top:0">Ways to pay</div>
+      <p class="note">Cash is always on and pays the price on the tile. For every other way, the left side is what the
+        customer pays on top of cash; the right is what it costs you to take the money. Leave the left empty and you eat
+        the fee; match it and the customer covers it. For an exact price on one particular thing, set it on that thing's
+        price instead.</p>
+      ${draft.methods.map(methodRow).join("")}
       <button class="btn sec sm auto" id="ptAdd" style="margin-bottom:6px">Add another way to pay</button>
 
       <div class="sect">On the ticket</div>
-      <p class="note">Cash is always there. Pick what sits beside it — everything else waits behind <b>Other</b>.</p>
-      <div class="togs">${draft.methods.filter(m => m.name.trim()).map(m =>
-        `<button class="tog sm" data-quick="${esc(m.id)}" aria-pressed="${draft.quick === m.id}">${esc(m.name)}</button>`).join("")}</div>
+      ${live.length > 2 ? `
+        <p class="note">${live.length + 1} ways to pay is more than fits, so Cash and one other get a button and the rest
+          wait behind <b>Other</b>. Pick which one sits beside Cash.</p>
+        <div class="togs">${live.map(m =>
+          `<button class="tog sm" data-quick="${esc(m.id)}" aria-pressed="${draft.quick === m.id}">${esc(m.name)}</button>`).join("")}</div>`
+      : `<p class="note">${live.length
+          ? "Cash" + live.map(m => ", " + esc(m.name)).join("").replace(/, ([^,]*)$/, " and $1") + " each get their own button — no <b>Other</b> needed. Switch on a fourth way and <b>Other</b> comes back."
+          : "Only Cash is on, so that's the only button."}</p>`}
 
       <div class="sect">Change</div>
       <div class="togs"><button class="tog sm" id="ptChange" aria-pressed="${draft.change}">Work out the change for cash sales</button></div>
@@ -6795,6 +7027,23 @@ function payTaxSheet() {
     $("#ptTaxOn").onclick = () => { read(); draft.tax.on = !draft.tax.on; draw(); };
     all("[data-tm]").forEach(b => b.onclick = () => { read(); draft.tax.mode = b.dataset.tm; draw(); });
     all("[data-quick]").forEach(b => b.onclick = () => { read(); draft.quick = b.dataset.quick; draw(); });
+    all("[data-pm-on]").forEach(b => b.onclick = () => {
+      read();
+      const m = draft.methods.find(x => x.id === b.dataset.pmOn);
+      if (m) m.active = m.active === false;
+      draw();
+    });
+    /* the worked example follows the numbers as they're typed */
+    all("[data-pm-up],[data-pm-upeach],[data-pm-round],[data-pm-pct],[data-pm-fixed]").forEach(inp => {
+      const redo = () => {
+        read();
+        const id = inp.getAttribute("data-pm-up") || inp.getAttribute("data-pm-upeach") || inp.getAttribute("data-pm-round")
+          || inp.getAttribute("data-pm-pct") || inp.getAttribute("data-pm-fixed");
+        const m = draft.methods.find(x => x.id === id), box = document.querySelector(`[data-pm-sum="${id}"]`);
+        if (m && box) box.innerHTML = verdict(m);
+      };
+      inp.oninput = redo; inp.onchange = redo;
+    });
     all("[data-pm-del]").forEach(b => b.onclick = () => {
       read();
       draft.methods = draft.methods.filter(m => m.id !== b.dataset.pmDel);
@@ -6805,9 +7054,15 @@ function payTaxSheet() {
 
   $("#ptGo").onclick = async () => {
     read();
+    if (draft.methods.some(m => m.id !== "card" && m.name.trim().toLowerCase() === "cash")) {
+      toast("Cash is built in — call that one something else");
+      return;
+    }
     S.settings.payMethods = draft.methods
       .filter(m => m.id === "card" || m.name.trim())
-      .map(m => ({ id: m.id, name: m.id === "card" ? "Card" : m.name.trim(), pct: +m.pct || 0, fixed: +m.fixed || 0 }));
+      .map(m => ({ id: m.id, name: m.id === "card" ? "Card" : m.name.trim(),
+        pct: +m.pct || 0, fixed: +m.fixed || 0,
+        up: +m.up || 0, upEach: +m.upEach || 0, round: m.round || "none", active: m.active !== false }));
     S.settings.tax = { on: !!draft.tax.on, rate: +draft.tax.rate || 0, mode: draft.tax.mode === "add" ? "add" : "in" };
     S.settings.payQuick = S.settings.payMethods.some(m => m.id === draft.quick) ? draft.quick : "";
     S.settings.changeCalc = !!draft.change;
@@ -6882,7 +7137,8 @@ function netInfoSheet() {
           <span class="s">${NET.ready ? "the app is stored on this tablet" : "open it once with a signal so it finishes saving"}</span></span>
         <span class="fact ${NET.ready ? "good" : "warn"}">${NET.ready ? "Done" : "Not yet"}</span></div>
     </div>
-    <p class="note">Backups are the one thing worth a signal — save one to the Files app after each market.</p>
+    <p class="note">Backups are the one thing worth a signal — save one to the Files app after each market.
+      This is <b>v${esc(APP_VER)}</b>.</p>
   `, null, { narrow: true });
 }
 
@@ -7570,7 +7826,8 @@ function packSheet(dayId, mode) {
       <span class="tickbox ${on ? "on" : ""}" aria-hidden="true">${on ? "✓" : ""}</span>
       <span class="b"><span class="n">${esc(it.name)}</span>
         ${missed ? '<span class="s" style="color:var(--warn-ink)">was packed — still not back</span>' : ""}</span>
-      ${it.group === "Just this market" || it.id.startsWith("p") ? `<span class="xbtn" data-drop="${esc(it.id)}" aria-label="Take ${esc(it.name)} off">✕</span>` : ""}
+      ${view === "out" && (it.group === "Just this market" || it.id.startsWith("p"))
+        ? `<span class="xbtn" data-drop="${esc(it.id)}" aria-label="Take ${esc(it.name)} off">✕</span>` : ""}
     </button>`;
   };
 

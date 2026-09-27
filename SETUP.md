@@ -83,7 +83,10 @@ separate storage, so data entered in one won't appear in the other.
 The Sell tab has two views, switched at the top left: **POS** and **Vendor view**.
 
 **POS** is what you use with a customer there: only what's on sale today, grouped by
-what it is, showing nothing but the price. Today's running total is hidden.
+what it is, showing nothing but the price. Today's running total is hidden, and the price is
+there to be read rather than tapped — a lean-over or a stray thumb can't change what you
+charge. Deals and gifts are unaffected: those live on the ticket line, where they belong,
+and still work mid-sale.
 
 ### Has the day paid for itself?
 
@@ -191,17 +194,73 @@ appearing, that's a hint it deserves a proper tile under **Make**.
 
 ### How they paid
 
-The ticket ends in **Cash**, **Venmo** and **Other**, in place of one Complete order button.
-Card lives behind **Other** until you want it on the ticket — under **Paying & tax**, *On the ticket* picks
-which way of paying sits beside Cash. Which one you tap is stored on the sale, so Reports can show takings split by method and
+The ticket ends in a button for each way you take money, in place of one Complete order
+button. There's room for three: with Cash plus up to two others switched on (say Card and
+Venmo), each gets its own button and there's no **Other**. Switch on a fourth and it becomes
+Cash, one you pick, and **Other** for the rest — under **Paying & tax**, *On the ticket* picks
+which one sits beside Cash. A way to pay you don't use can be switched **Off** in Paying & tax:
+it stops being offered anywhere at the counter, but past sales made that way keep their name
+and their fee. Which one you tap is stored on the sale, so Reports can show takings split by method and
 the cash tray can be checked at the end of the day. A ticket that comes to nothing — all
 gifts or practice — shows **Complete order** instead and asks nothing.
 
-**Other** lists every other way you've set up — Card, and anything else — and lets you add one
-on the spot: type "Zelle", tap **Add it and use it**, and the sale goes through against it.
+**Other**, when it's there, lists the rest and lets you add one on the spot: type "Zelle", tap
+**Add it and use it**, and the sale goes through against it. Typing the name of one you'd
+switched off just switches it back on.
 
 Sales from before all this existed read as **Not recorded**, and are left out of the cash
 tray sums rather than being assumed to be one thing or the other.
+
+### Charging more on some ways to pay
+
+Cash pays the price on the tile. Any other way can cost more — Venmo at $1.25 where cash is
+$1 — and the app carries that through the whole sale rather than making you do sums at the
+table.
+
+**None of this shows up until you set it.** Out of the box every way of paying costs the
+same as cash, so tiles show one price and the buttons are just names. Set a figure and the
+extra prices appear everywhere at once.
+
+Where to set it: **Sell → Vendor view → Paying & tax**. That button sits on the grey bar at
+the top of the Sell screen, beside POS / Vendor view, and only appears in Vendor view. The
+sheet opens on **Ways to pay**.
+
+Each way of paying is one row with two sides next to each other. On the left, **Customer
+pays extra**: a **% more**, a **$ more each**, or both, and a rounding choice — leave it exact,
+or round up to the nearest 5¢, 25¢ or dollar. On the right, **It costs you**: the fee the
+reader or app takes. Under both, a $10 sale is worked through as you type — what they pay,
+the fee, what you keep — with a plain answer to the only real question: **You eat the whole
+fee**, **The customer covers $0.60 of the $0.61 fee**, or **The customer covers it**. Rounding up matters more than it
+sounds: 25% on a $6 dog is $7.50, which is fine, but rounding up to the dollar makes it $8
+and saves everyone counting quarters in the wind.
+
+**For an exact price on one particular thing**, set it on that thing instead. Tap its price
+on the Sell screen and there's a box for each way of paying beside the cash price. Leave it
+empty and it follows the rule; type $7 in and that's what Venmo costs, whatever the rule
+says. That's the one to use when the rule gives you $7.50 and you want $7.
+
+What you see while selling:
+
+- **The tile** shows the cash price, with the others underneath — "$1.25 Venmo".
+- **The ticket buttons** carry their own totals: Cash stays plain, **Venmo $10.00** under the
+  name. Tapping one is both the price and the record of how they paid.
+- **Other** lists the rest with what each comes to.
+- The **change calculator** works off the cash price, since it only opens for cash.
+
+Nothing on the ticket is tied to a way of paying, so changing their mind costs you nothing.
+Everything sits at the cash price until a button is tapped, and tapping a different one
+re-prices the whole ticket there and then. If the change calculator is already open when
+they say "actually, Venmo", **Changed their mind?** at the bottom of it lists every way with
+what it comes to — one tap finishes the sale that way instead. Backing out of that sheet
+leaves the ticket exactly as it was.
+
+A gift is still a gift and practice is still free — nothing at zero gets an uplift. A deal
+works off what was actually rung up, so 50% off a $6 dog is $3 cash and $3.75 on Venmo. The
+sale records the price actually charged, so takings, sales tax, the cash tray and every
+report are in the real money, with what the uplift added kept alongside.
+
+Leave every box empty and nothing changes anywhere: one price, no extra lines on tiles, no
+prices on the buttons.
 
 ### Change
 
@@ -215,12 +274,15 @@ Switch the whole thing off under **Paying & tax** if it slows you down.
 
 ### Paying & tax
 
-In **Vendor view** at the top of the Sell screen, next to the price switches. Three things
+In **Vendor view** at the top of the Sell screen, next to the price switches. Four things
 live there:
 
-- **What it costs you to take the money.** A percent, a few cents a sale, or both, for the
-  card reader and each other way to pay. Fees never change what the customer pays — they
-  come off what you kept, and get their own line in the cash flow.
+- **Ways to pay.** One row per way of paying, each switched **On** or **Off**, with what the
+  customer pays extra on the left and what it costs you on the right — the section above.
+  Fees never change what the customer pays; they come off what you kept, and get their own
+  line in the cash flow.
+- **On the ticket** — which one sits beside Cash, only asked when there are too many for a
+  button each.
 - **Change** — the calculator above, on or off.
 - **Sales tax** — off until you switch it on.
 
@@ -256,9 +318,13 @@ swap one for another shares a category, so White, Red and Glitter are all "260 b
 
 ### Setting a price
 
-Price isn't part of making something — it's set from the **Sell** screen. Tap the price on
-any tile and the sheet tells you what it costs to make and what you'd keep at the price
-you type.
+Price isn't part of making something — it's set from the **Sell** screen, in **Vendor view**.
+Tap anywhere on a tile there — picture, name, price, the small print — and the sheet tells you what it costs to make and what you'd
+keep at the price you type. In POS the same figure is plain text.
+
+If any way of paying charges more than cash, that sheet also carries a box per method
+beside the cash price — empty follows the rule you set under Paying & tax, filled in sets an
+exact price that way.
 
 ### What it costs to make
 
@@ -308,8 +374,11 @@ what a product can make.
 
 Tapping a product with a choice in its recipe opens the sheet and asks which one. It shows
 only what you brought **and** have in stock, with counts — so a colour that's run out or
-stayed at home isn't there to mis-tap. **Show N I didn't bring** reveals the rest when the
-count is wrong or you fetched something from the car. Picking Glitter adds its price uplift — multiplied by how
+stayed at home isn't there to mis-tap. In POS that's the whole list: a colour sitting at
+home is no use to the person in front of you, so it isn't offered. The one exception is when
+nothing you brought is left — then **Show N I didn't bring** appears anyway, so a sale is
+never stuck. In Vendor view, tapping a line already on the ticket gives you the same reveal
+whenever you want it. Picking Glitter adds its price uplift — multiplied by how
 many it uses, so a Jumbo glitter dog is base + Jumbo + two lots of the glitter uplift.
 
 Completing the sale takes the materials out, oldest batch first, and the cost recorded
@@ -795,6 +864,16 @@ and your existing data is left alone.
 Replace `index.html` on GitHub, **and** open `sw.js` and change `stallbook-v1` to
 `stallbook-v2`. Without that bump the iPad keeps serving the cached old version.
 Then reopen the app twice — once to fetch, once to run the new one.
+
+### Which version am I running?
+
+**Safe → This copy** says so: *Stallbook v45*. Check that number first whenever something
+described in a note or a message isn't where it's meant to be — nine times out of ten the
+tablet is still serving the last version it cached.
+
+**Check for an update** on that card asks the server, with a signal, whether there's a newer
+one. If there is, the pill at the top says **New version ready**; tap it and the app reloads
+into the new version with everything saved left exactly as it is.
 
 ## Troubleshooting
 

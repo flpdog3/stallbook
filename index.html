@@ -174,7 +174,9 @@ h1,h2,h3{margin:0;font-family:var(--display);font-weight:700}
   display:flex;flex-direction:column;align-items:center;gap:10px;text-align:center;
   box-shadow:var(--shadow-card);transition:transform .14s ease,box-shadow .14s ease;
 }
+.tile{cursor:pointer;user-select:none;-webkit-user-select:none}
 .tile:hover{transform:translateY(-4px);box-shadow:var(--shadow-lift)}
+.tile:active{transform:translateY(-1px)}
 .tilehit{display:flex;flex-direction:column;align-items:center;gap:10px;width:100%;background:none}
 .tile.pop{animation:sbPop .24s ease}
 .tile.off{opacity:.55}
@@ -183,9 +185,25 @@ h1,h2,h3{margin:0;font-family:var(--display);font-weight:700}
   background:var(--sand);border-radius:999px;padding:6px 16px;
   font-family:var(--display);font-weight:700;font-size:19px;color:var(--ink);
 }
-.tile .pp:hover{background:var(--sand-3)}
 .tile .sl{font-size:12px;font-weight:600;color:var(--ink-mute)}
 .tile .sl.warn{color:var(--warn-ink)}
+
+/* ============ ways to pay ============ */
+.pw{background:var(--paper)}
+.pw.off{opacity:.7}
+.pwhead{display:flex;align-items:center;gap:10px;margin-bottom:10px}
+.pw.off .pwhead{margin-bottom:0}
+.pwhead .n{font-family:var(--display);font-weight:700;font-size:18px}
+.pwcols{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.pwcol{background:var(--card);border-radius:18px;padding:10px 12px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.pwcol .t{font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-mute)}
+.pwcol .s{font-size:12px;color:var(--ink-mute)}
+.pwin{display:flex;gap:8px}
+.pwf{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px}
+.pwf input{width:100%;text-align:right}
+.pwf span{font-size:11px;font-weight:600;color:var(--ink-mute);text-align:right;padding-right:6px}
+.pwsum{font-size:14px;color:var(--ink-soft);margin:10px 2px 0;line-height:1.7}
+@media (max-width:560px){.pwcols{grid-template-columns:1fr}}
 
 /* ============ ticket ============ */
 .tkstack{display:flex;flex-direction:column;gap:10px;flex:1;min-height:0}
@@ -423,8 +441,8 @@ h1,h2,h3{margin:0;font-family:var(--display);font-weight:700}
 
 /* ============ paying, change and the tray ============ */
 .payrow{display:grid;grid-template-columns:1fr 1fr auto;gap:10px;margin-bottom:10px}
-.payrow .btn{padding:17px 8px}
-.payrow .btn.sec{padding:17px 20px}
+.payrow .btn{padding:17px 4px;font-size:18px}
+.payrow .btn.sec{padding:17px 6px}
 .duebox{
   display:flex;align-items:baseline;justify-content:space-between;gap:12px;
   background:var(--green-tint);border-radius:22px;padding:14px 20px;margin-bottom:6px;
