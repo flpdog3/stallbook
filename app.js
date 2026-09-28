@@ -2398,7 +2398,7 @@ function feeFor(id, total) {
 }
 const changeCalcOn = () => S.settings.changeCalc !== false;
 /* bumped alongside CACHE in sw.js, so "which one am I running?" has an answer */
-const APP_VER = "54";
+const APP_VER = "55";
 
 /* ---------------------- charging more on some methods -------------------
    Cash is the price on the tile. A method can cost the customer more —
@@ -4026,7 +4026,16 @@ function renderItems() {
       <span style="flex:1"></span>
       <button class="btn sm auto" id="addThing">+ Add something</button>
     </div>
-    ${shown.length ? `<div class="pgrid">${shown.map(productCard).join("")}</div>`
+    ${shown.length ? (() => {
+        /* grouped by each product's Group, like Inventory is by type */
+        const groups = {};
+        for (const it of shown) (groups[(it.type || "").trim() || "No group"] ||= []).push(it);
+        return Object.keys(groups)
+          .sort((a, b) => (a === "No group") - (b === "No group") || a.localeCompare(b))
+          .map(g => `<section class="tsec"><div class="typehead"><span class="sect" style="margin:0">${esc(g)}</span>
+              <span class="cnt">${groups[g].length}</span></div>
+            <div class="pgrid">${groups[g].sort((a, b) => a.name.localeCompare(b.name)).map(productCard).join("")}</div></section>`).join("");
+      })()
       : `<p class="note">${q ? `Nothing matches "${esc(q)}".`
         : "Nothing here yet. Add the first thing you make, say what it's built from, and the cost works itself out."}</p>`}
     ${S.items.some(hasRecipe) ? '<p class="note" style="margin-top:14px">Cost is what the materials last cost. The figure on a real sale is what the batches it drew on actually cost.</p>' : ""}`;
@@ -4101,7 +4110,7 @@ function renderStock() {
           : "nothing to chase"}</div></button>
     </div>` : '<p class="note">Inventory is what you buy: a white 260, a metre of ribbon, a weight. Give each one a type — like "260 balloon" — so a recipe can say "any 260 balloon" and every colour you add works straight away.</p>'}
     ${q && !found && !offCount ? `<p class="note">Nothing matches "${esc(q)}".</p>` : ""}
-    ${live.map(([cat, ms]) => `
+    ${live.map(([cat, ms]) => `<section class="tsec">
       <div class="typehead">
         <span class="sect" style="margin:0">${esc(cat)}</span>
         <button class="tlink" data-typeuse="${esc(cat)}">Use in makes</button>
@@ -4109,7 +4118,7 @@ function renderStock() {
         ${(byCat[cat] || []).length ? "" : `<button class="tlink x" data-typedel="${esc(cat)}" aria-label="Delete ${esc(cat)}">✕</button>`}
       </div>
       ${ms.length ? `<div class="pgrid">${ms.sort((a, b) => a.name.localeCompare(b.name)).map(materialCard).join("")}</div>`
-        : `<p class="note">${q ? "Nothing here matches." : "Nothing under this type yet."}</p>`}`).join("")}
+        : `<p class="note">${q ? "Nothing here matches." : "Nothing under this type yet."}</p>`}</section>`).join("")}
     ${offCount ? `
       <button class="typehead" id="toggleOff" style="width:100%;margin-top:26px">
         <span class="sect" style="margin:0;color:var(--ink-mute)">Inactive · ${offCount}</span>
@@ -4117,14 +4126,14 @@ function renderStock() {
       </button>
       ${S.showInactive ? `
         ${retired.length ? `<div class="pgrid" style="margin-bottom:12px">${retired.map(materialCard).join("")}</div>` : ""}
-        ${off.map(([cat, ms]) => `
+        ${off.map(([cat, ms]) => `<section class="tsec">
           <div class="typehead">
             <span class="sect" style="margin:0;color:var(--ink-mute)">${esc(cat)}</span>
             <button class="tlink" data-typeon="${esc(cat)}">Make active</button>
             ${(byCat[cat] || []).length ? "" : `<button class="tlink x" data-typedel="${esc(cat)}" aria-label="Delete ${esc(cat)}">✕</button>`}
           </div>
           ${ms.length ? `<div class="pgrid">${ms.map(materialCard).join("")}</div>`
-            : '<p class="note">nothing filed under it</p>'}`).join("")}` : ""}` : ""}`;
+            : '<p class="note">nothing filed under it</p>'}</section>`).join("")}` : ""}` : ""}`;
 
   const sb = $("#stockSearch");
   if (sb) {
@@ -6427,12 +6436,12 @@ function renderGear() {
         <div class="n">${fix.length ? esc(fix.map(a => a.name).slice(0, 2).join(", ")) + (fix.length > 2 ? " and more" : "") : "all in working order"}</div></div>
     </div>` : `<p class="note">Equipment is what the stall is built from — the table, the cloth, display stands, signs, the gazebo. It's never sold, so it lives here rather than in Inventory and doesn't touch the cost of anything you make.</p>`}
     ${q && !found && !retired.length ? `<p class="note">Nothing matches "${esc(q)}".</p>` : ""}
-    ${groups.map(([t, as]) => `
+    ${groups.map(([t, as]) => `<section class="tsec">
       <div class="typehead">
         <span class="sect" style="margin:0">${esc(t)}</span>
       </div>
       ${as.length ? `<div class="pgrid">${as.sort((a, b) => a.name.localeCompare(b.name)).map(assetCard).join("")}</div>`
-        : `<p class="note">${q ? "Nothing here matches." : "Nothing under this type yet."}</p>`}`).join("")}
+        : `<p class="note">${q ? "Nothing here matches." : "Nothing under this type yet."}</p>`}</section>`).join("")}
     ${retired.length ? `
       <button class="typehead" id="toggleRetired" style="width:100%;margin-top:26px">
         <span class="sect" style="margin:0;color:var(--ink-mute)">Retired · ${retired.length}</span>

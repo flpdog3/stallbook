@@ -831,7 +831,11 @@ screen — Inventory answers "what have I got", Reports answers "what did it cos
 
 ### Finding things
 
-Both Inventory and Make show compact cards with a search box above them. Inventory searches
+Both Inventory and Make show compact cards with a search box above them, in sections:
+Inventory by type, Make by each product's **Group** (anything without one sits under **No
+group** at the end), each heading with how many are in it. As you scroll, the heading of the
+section you're in stays pinned to the top of the screen until the next one pushes it away,
+so you always know which type you're looking at. Equipment's types work the same way. Inventory searches
 names, types and units; Make searches names, the types a product uses and the materials it
 names.
 

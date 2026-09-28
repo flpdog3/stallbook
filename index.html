@@ -361,6 +361,17 @@ h1,h2,h3{margin:0;font-family:var(--display);font-weight:700}
 .acc[aria-expanded="false"]{opacity:.85}
 .accbody{animation:sbFade .16s ease}
 .typehead{display:flex;align-items:center;gap:10px;margin:22px 0 12px;background:none;width:100%;text-align:left}
+/* a type's heading stays pinned to the top while you scroll through it, until
+   the next type's heading pushes it off */
+/* each type is its own section, so its heading only stays pinned within it —
+   the next type's heading pushes it up and away */
+.tsec{padding-bottom:6px}
+.panel .tsec > .typehead{
+  position:sticky;top:-8px;z-index:4;background:var(--paper);
+  margin:14px 0 6px;padding:12px 2px 10px;
+  box-shadow:0 8px 10px -10px rgba(44,42,38,.25);
+}
+.typehead .cnt{font-size:13px;font-weight:700;color:var(--ink-mute);background:var(--sand-2);border-radius:999px;padding:3px 10px}
 .typehead .sect{flex:0 0 auto}
 .tlink{
   font-size:13px;font-weight:700;color:var(--ink-mute);background:var(--sand-2);
