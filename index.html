@@ -142,10 +142,26 @@ h1,h2,h3{margin:0;font-family:var(--display);font-weight:700}
 .body{flex:1;min-height:0;display:flex;gap:16px;padding:0 20px 0 0}
 .panel{flex:1;min-width:0;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:8px 20px 22px}
 .asidewrap{
-  flex:0 1 clamp(292px,30%,372px);min-width:0;display:flex;gap:12px;
+  flex:0 1 clamp(320px,34%,400px);min-width:0;display:flex;gap:12px;
   padding:8px 0 calc(22px + var(--pad));
 }
-.asidewrap.withlist{flex:0 1 clamp(452px,44%,600px)}
+.asidewrap.withlist{flex-direction:column;gap:10px}
+/* With more than one ticket, the others sit as a row of small tabs above the
+   open one, so the open ticket keeps its full width instead of sharing it. */
+.asidewrap.withlist .tklist{
+  order:-1;flex:0 0 auto;flex-direction:row;flex-wrap:wrap;align-content:flex-start;
+  overflow-x:hidden;overflow-y:auto;max-height:200px;padding:2px 2px 6px;gap:8px;
+  -webkit-overflow-scrolling:touch;overscroll-behavior:contain;
+}
+/* tabs share the row and wrap onto the next, so every ticket stays in sight */
+.asidewrap.withlist .tkshut{flex:1 1 138px;width:auto;min-width:0;max-width:none;padding:8px 11px}
+.asidewrap.withlist .tkshut .tkhead{margin-bottom:2px;gap:6px;flex-wrap:nowrap;white-space:nowrap}
+.asidewrap.withlist .tkshut .n{font-size:14px}
+.asidewrap.withlist .tkshut .amt{font-size:14px}
+.asidewrap.withlist .tkshut .peek + .peek,
+.asidewrap.withlist .tkshut .more{display:none}
+/* always in reach at the front of the row, however many tickets are open */
+.asidewrap.withlist .tklist .btn{order:-1;flex:0 0 auto;width:auto;padding:0 14px;font-size:15px;align-self:stretch;min-height:52px}
 .tkmain{flex:1;min-width:0;display:flex;flex-direction:column}
 .tklist{
   flex:0 0 186px;min-width:0;display:flex;flex-direction:column;gap:10px;
@@ -239,11 +255,18 @@ h1,h2,h3{margin:0;font-family:var(--display);font-weight:700}
   background:var(--paper);border-radius:20px;padding:10px;margin-bottom:6px;
 }
 .tline .qd{
-  width:38px;height:38px;border-radius:50%;flex:0 0 38px;display:flex;align-items:center;justify-content:center;
-  font-family:var(--display);font-weight:700;font-size:16px;color:#fff;box-shadow:var(--sheen);
+  width:38px;height:38px;border-radius:12px;flex:0 0 38px;display:flex;align-items:flex-end;justify-content:center;
+  font-family:var(--display);font-weight:700;font-size:16px;color:var(--ink);background:var(--sand-2);
+  background-position:center;background-size:cover;padding:0 0 1px;align-items:center;
 }
+/* with a photo, the count sits on a small dark tab so it stays readable */
+.tline .qd.pic{align-items:flex-end;padding:0 0 3px}
+.tline .qd.pic span{background:rgba(44,42,38,.72);color:#fff;border-radius:8px;padding:0 5px;font-size:13px;line-height:17px}
+.mpic{display:inline-block;flex:0 0 auto;border-radius:8px;background:var(--sand) center/cover no-repeat;
+  box-shadow:inset 0 0 0 1px rgba(0,0,0,.05);vertical-align:middle}
+.inset .mpic{border-radius:10px}
 .tline .b{flex:1;min-width:0}
-.tline .n{display:block;font-family:var(--display);font-weight:700;font-size:17px;line-height:1.2}
+.tline .n{display:block;font-family:var(--display);font-weight:700;font-size:17px;line-height:1.2;overflow-wrap:anywhere}
 .tline .o{display:block;font-size:13px;color:var(--ink-mute);margin-top:1px}
 .tline .amt{font-family:var(--display);font-weight:700;font-size:18px;flex:0 0 auto}
 .tempty{padding:18px 20px;text-align:center;font-size:15px;color:var(--ink-mute)}
@@ -613,7 +636,7 @@ h1,h2,h3{margin:0;font-family:var(--display);font-weight:700}
 .bar.pop .l{flex:0 0 34%;min-width:0;display:flex;flex-direction:column;gap:1px}
 .bar.pop .pn{display:flex;align-items:center;gap:7px;min-width:0}
 .bar.pop .pn b{font-family:var(--display);font-weight:700;font-size:15px;color:var(--ink);overflow-wrap:anywhere}
-.bar.pop .ps{font-size:12px;color:var(--ink-mute);padding-left:19px}
+.bar.pop .ps{font-size:12px;color:var(--ink-mute)}
 .bar.pop .v{min-width:56px}
 .filters{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:18px}
 .filters select,.filters input[type=date]{
@@ -643,6 +666,11 @@ select{
 .rowf{display:flex;gap:12px;flex-wrap:wrap}
 .rowf>*{flex:1;min-width:120px}
 .grp{background:var(--paper);border-radius:22px;padding:14px;margin-bottom:12px}
+.whichrow{margin:0 0 12px;padding:0 0 10px 12px;border-left:3px solid var(--sand-3)}
+.whichrow .t{margin-top:4px !important}
+.andsep{display:flex;align-items:center;gap:10px;margin:-4px 0 8px;color:var(--ink-mute);
+  font-size:12px;font-weight:700;letter-spacing:.12em;text-transform:uppercase}
+.andsep::before,.andsep::after{content:"";flex:1;height:1px;background:var(--sand-3)}
 .grp .gh{display:flex;gap:10px;align-items:center;margin-bottom:10px}
 .grp .gh input{flex:1}
 .orow{display:flex;gap:10px;align-items:center;margin-bottom:8px}

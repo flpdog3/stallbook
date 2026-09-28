@@ -113,6 +113,10 @@ const ICON_PHOTO = '<svg width="26" height="26" viewBox="0 0 24 24" fill="none" 
 const thumb = (thing, cls, spot) => thing && thing.photo
   ? `<span class="thumb ${cls || ""}" style="background-image:url('${thing.photo}')"></span>`
   : spot ? `<span class="thumb empty ${cls || ""}" aria-hidden="true">${ICON_PHOTO}</span>` : "";
+/* A material or product listed by name shows its own photo, small, beside it —
+   or nothing at all. No guessed colours. */
+const matPic = (thing, size) => thing && thing.photo
+  ? `<span class="mpic" style="width:${size || 26}px;height:${size || 26}px;background-image:url('${thing.photo}')"></span>` : "";
 const colorDot = (color, size) =>
   `<span class="dot" style="width:${size || 20}px;height:${size || 20}px;background:${color}"></span>`;
 
@@ -797,6 +801,19 @@ function unitSelect(id, chosen) {
   </select>`;
 }
 
+/* What a unit costs you right now: the batch the next one comes out of,
+   since stock is used oldest first. With nothing on the shelf, what the
+   last batch cost. */
+function costNow(stockId) {
+  const next = S.lots.filter(l => lotRef(l) === stockId && l.remaining > 0)
+    .sort((a, b) => (a.date || "").localeCompare(b.date || "") || a.created - b.created)[0];
+  return next ? (+next.unitCost || 0) : lastCost(stockId);
+}
+const costWord = (n, unit) => {
+  const u = unit || "each";
+  return n < 0.1 && n > 0 ? "$" + (Math.round(n * 1000) / 1000).toFixed(3) + (u === "each" ? " each" : " a " + u)
+    : cur(n) + (u === "each" ? " each" : " a " + u);
+};
 /* What a unit last cost you. Taken from the newest batch, so adding stock
    prefills from the last order rather than a figure kept by hand. */
 function lastCost(stockId) {
@@ -814,12 +831,34 @@ function lastCost(stockId) {
    balloons where a Standard takes one.
    ----------------------------------------------------------------- */
 const hasRecipe = item => !!(item && item.recipe && item.recipe.length);
-/* A line names a type and, if you want, the particular materials of that type
-   this product may use. Naming none means any of them will do. */
+/* Lines are AND: a wand needs its stick balloon AND its 5" balloon. Within a
+   line it's OR: the stick can be any 260, 260 Mirror or 260 Pastel. A line
+   names one or more types and, if you want, the particular materials of those
+   types this product may use. Naming none means any of them will do. */
+const lineTypes = rl => (Array.isArray(rl.types) && rl.types.length ? rl.types : [rl.category]).filter(Boolean);
+const lineLabel = rl => lineTypes(rl).join(" or ") || "Material";
+/* Limits are per type: name some 260s and the box takes only those 260s, while
+   a type in the same box with nothing named still takes any of its own. */
 function lineMats(rl) {
-  const chosen = (rl.materials || []).map(matById).filter(Boolean);
-  return chosen.length ? chosen : matsIn(rl.category);
+  const chosen = new Set(rl.materials || []);
+  const seen = new Set(), out = [];
+  for (const t of lineTypes(rl)) {
+    const all = matsIn(t), named = all.filter(m => chosen.has(m.id));
+    for (const m of (named.length ? named : all)) if (!seen.has(m.id)) { seen.add(m.id); out.push(m); }
+  }
+  return out;
 }
+/* "260 (only Red, White) or 260 Mirror" — how a box reads, one type at a time */
+function boxWords(rl, without) {
+  const chosen = new Set(rl.materials || []);
+  return lineTypes(rl).filter(t => t !== without).map(t => {
+    const named = matsIn(t).filter(m => chosen.has(m.id));
+    return esc(t) + (named.length ? ` <span style="font-weight:600;color:var(--ink-mute)">(only ${esc(named.map(m => m.name).join(", "))})</span>` : "");
+  }).join(" or ");
+}
+/* A line that uses 2 or more whole things can be split: two of the same, or
+   one each of two. Its pick is then a list, one material per unit. */
+const lineSplits = rl => { const q = +rl.qty || 0; return q >= 2 && Number.isInteger(q) && isWholeUnit((lineMats(rl)[0] || {}).unit); };
 const linePickable = (rl, showAll) => lineMats(rl).filter(m => showAll || atHand(m));
 const lineNeedsChoice = rl => lineMats(rl).length > 1;
 const usesMaterials = item => hasRecipe(item);
@@ -833,10 +872,26 @@ function resolveRecipe(item, opts, picks) {
     const qty = lineQtyFor(rl);
     if (qty <= 0) continue;
     const only = lineMats(rl);
-    let id = (picks || {})[rl.id];
-    if (!id || !only.some(m => m.id === id)) id = (only.find(atHand) || only[0] || {}).id;
+    const fallback = (only.find(atHand) || only[0] || {}).id;
+    const valid = id => !!id && only.some(m => m.id === id);
+    const pick = (picks || {})[rl.id];
+    /* a split line: one id per unit, counted up per material */
+    if (Array.isArray(pick) && lineSplits(rl)) {
+      const units = pick.filter(valid).slice(0, qty);
+      while (units.length < qty) units.push(units[0] || fallback);
+      const counts = new Map();
+      for (const id of units) counts.set(id, (counts.get(id) || 0) + 1);
+      for (const [id, n] of counts) {
+        const m = matById(id);
+        out.push({ recipeLineId: rl.id, category: m ? m.category : lineTypes(rl)[0], materialId: id || null,
+          name: m ? m.name : "(nothing to use)", qty: n, material: m || null });
+      }
+      continue;
+    }
+    let id = Array.isArray(pick) ? pick[0] : pick;
+    if (!valid(id)) id = fallback;
     const m = matById(id);
-    out.push({ recipeLineId: rl.id, category: rl.category, materialId: id || null,
+    out.push({ recipeLineId: rl.id, category: m ? m.category : lineTypes(rl)[0], materialId: id || null,
       name: m ? m.name : "(nothing to use)", qty, material: m || null });
   }
   return out;
@@ -2343,7 +2398,7 @@ function feeFor(id, total) {
 }
 const changeCalcOn = () => S.settings.changeCalc !== false;
 /* bumped alongside CACHE in sw.js, so "which one am I running?" has an answer */
-const APP_VER = "46";
+const APP_VER = "54";
 
 /* ---------------------- charging more on some methods -------------------
    Cash is the price on the tile. A method can cost the customer more —
@@ -2579,7 +2634,7 @@ function priceSheet(it) {
       <p class="note">Which ones you're offering today, and what a customer pays extra for
         picking one. Switching one off here leaves it in stock — it just isn't on the table.</p>
       <div class="card">${optionMats.map(m => `<div class="inset">
-        ${colorDot(balloonColor(m.name) || hueFor(m.name), 18)}
+        ${matPic(m, 30)}
         <span class="b"><span class="n">${esc(m.name)}</span>
           <span class="s">${Math.round(onHandTotal(m.id) * 100) / 100} ${esc(m.unit || "each")} left</span></span>
         <button class="tog sm" data-mon="${esc(m.id)}" aria-pressed="${isPacked(m)}"
@@ -2723,20 +2778,23 @@ function lineSheet(item, existing) {
         /* count what's being held back even while everything is shown, so the
            way back into the short list doesn't vanish once it's used */
         const hiddenCount = all.length - linePickable(rl, false).length;
-        return `<div class="slabel">${esc(rl.category || "Material")}${need !== 1 ? " · uses " + need : ""}</div>
+        /* how many of each this line is using right now */
+        const used = {};
+        for (const r of resolveRecipe({ recipe: [rl] }, [], st.picks)) if (r.materialId) used[r.materialId] = r.qty;
+        const split = lineSplits(rl);
+        return `<div class="slabel">${esc(lineLabel(rl))}${need !== 1 ? " · uses " + need : ""}${split ? " · mix them if you like" : ""}</div>
           <div class="togs" data-pick="${esc(rl.id)}">
             ${options.length ? options.map(m => {
               const have = onHandTotal(m.id);
-              const c = balloonColor(m.name) || hueFor(m.name);
-              const short = have < need * st.qty;
-              return `<button class="tog" data-m="${esc(m.id)}" aria-pressed="${st.picks[rl.id] === m.id}">
-                ${colorDot(c)}${esc(m.name)}<span class="d" style="${short ? "color:var(--warn-ink)" : ""}">${have} left</span>
+              const short = have < (used[m.id] || need) * st.qty;
+              return `<button class="tog" data-m="${esc(m.id)}" aria-pressed="${!!used[m.id]}">
+                ${matPic(m)}${split && used[m.id] ? `<b>${used[m.id]}×</b> ` : ""}${esc(m.name)}<span class="d" style="${short ? "color:var(--warn-ink)" : ""}">${have} left</span>
                 ${+m.priceDelta ? `<span class="d">${m.priceDelta > 0 ? "+" : "−"}${cur(Math.abs(m.priceDelta))}</span>` : ""}
               </button>`;
             }).join("")
             : (all.length
-                ? `<p class="note">None of your ${esc(rl.category)} came to this market, or they're all used up.</p>`
-                : `<p class="note">Nothing in "${esc(rl.category)}" yet — add some under Inventory.</p>`)}
+                ? `<p class="note">None of your ${esc(lineLabel(rl))} came to this market, or they're all used up.</p>`
+                : `<p class="note">Nothing in "${esc(lineLabel(rl))}" yet — add some under Inventory.</p>`)}
           </div>
           ${hiddenCount > 0 && (vendorMode() || showAll || !options.length)
             /* at the counter you only get this offered when the short list is
@@ -2780,7 +2838,20 @@ function lineSheet(item, existing) {
 
     document.querySelectorAll("[data-pick]").forEach(wrap => {
       const rid = wrap.dataset.pick;
-      wrap.querySelectorAll("[data-m]").forEach(b => b.onclick = () => { st.picks[rid] = b.dataset.m; body(); });
+      const rl = pickLines.find(x => x.id === rid);
+      wrap.querySelectorAll("[data-m]").forEach(b => b.onclick = () => {
+        if (!rl || !lineSplits(rl)) { st.picks[rid] = b.dataset.m; body(); return; }
+        /* Split line: each tap means "one more of this", bumping out the
+           oldest of the others. From two White, tap Red → White + Red; tap Red
+           again → two Red. Tapping one that's already all of them does nothing. */
+        const n = +rl.qty, m = b.dataset.m;
+        const units = resolveRecipe({ recipe: [rl] }, [], st.picks).flatMap(r => Array(r.qty).fill(r.materialId));
+        if (Array.isArray(st.picks[rid])) units.splice(0, units.length, ...st.picks[rid].slice(0, n));
+        const out = units.findIndex(x => x !== m);
+        if (out >= 0) { units.splice(out, 1); units.push(m); }
+        st.picks[rid] = units;
+        body();
+      });
     });
     document.querySelectorAll("[data-showall]").forEach(b => b.onclick = () => { showAll = !showAll; body(); });
     if ($("#scopeOne")) $("#scopeOne").onclick = () => { scope = 1; st.qty = 1; body(); };
@@ -2909,7 +2980,7 @@ function scrapSheet(item, st) {
     <p class="note">These come off the shelf as used up, and the ticket stays as it is so you
       can have another go. Nothing about the price changes.</p>
     <div class="card">${used.map(u => `<div class="inset">
-      ${colorDot(balloonColor(u.name) || hueFor(u.name), 18)}
+      ${matPic(u.material, 30)}
       <span class="b"><span class="n">${esc(u.name)}</span>
         <span class="s">${Math.round(onHandTotal(u.material.id) * 100) / 100} ${esc(u.material.unit || "each")} left</span></span>
       <span class="r">${u.qty} × ${esc(cur(lastCost(u.material.id)))}</span>
@@ -2960,9 +3031,7 @@ function lineRow(l, ticketId) {
     : [];
   /* opts are derived from the material picks, so the two lists overlap */
   const words = [...new Set(l.opts.filter(x => x.o).map(x => x.o).concat(mats))];
-  const colour = item0 && isMaterialSale(item0.id)
-    ? (balloonColor(item0.name) || hueFor(item0.name))
-    : itemColor(item0 || { name: l.name }, l.opts);
+
   let chip = "";
   if (l.mode === "free") chip = `<span class="chip">Gift${l.reason ? " · " + esc(l.reason) : ""}</span>`;
   else if (l.mode === "practice") chip = `<span class="chip neutral">Practice</span>`;
@@ -2970,7 +3039,8 @@ function lineRow(l, ticketId) {
   else if (l.mode === "set") chip = `<span class="chip">Own price · was ${esc(cur(l.base))}</span>`;
   else if (l.mode === "replace") chip = `<span class="chip">Swap${(+l.dVal || 0) ? " · " + esc(cur(+l.dVal)) : " · no charge"}${l.reason ? " · " + esc(l.reason) : ""}</span>`;
   return `<div class="tline">
-    <button class="qd" data-line="${l.uid}" data-tk="${ticketId}" style="background:${colour}" aria-label="Change ${esc(l.name)}">${l.qty}×</button>
+    <button class="qd ${item0 && item0.photo ? "pic" : ""}" data-line="${l.uid}" data-tk="${ticketId}"
+      ${item0 && item0.photo ? `style="background-image:url('${item0.photo}')"` : ""} aria-label="Change ${esc(l.name)}"><span>${l.qty}×</span></button>
     <button class="b" data-line="${l.uid}" data-tk="${ticketId}" style="text-align:left">
       <span class="n">${esc(l.name)}</span>
       ${words.length ? `<span class="o">${esc(words.join(" · "))}</span>` : ""}
@@ -3061,7 +3131,7 @@ function renderTicket() {
           <span class="amt">${esc(cur(ticketTotal(x)))}</span></span>
         ${ticketPeek(x)}
       </button>`;
-    }).join("") + '<button class="btn sec sm" id="newTicket">+ Another</button>';
+    }).join("") + '<button class="btn sec sm" id="newTicket" aria-label="Another ticket">+ New</button>';
 
   document.querySelectorAll("[data-open-tk]").forEach(b => b.onclick = async () => {
     S.activeTicket = b.dataset.openTk;
@@ -3256,7 +3326,7 @@ function kitSheet() {
             const c = balloonColor(m.name) || hueFor(m.name);
             const n = onHandTotal(m.id);
             return `<button class="tog sm" data-kit="${esc(m.id)}" aria-pressed="${isPacked(m)}">
-              ${colorDot(c, 16)}${esc(m.name)}<span class="d">${Math.round(n * 100) / 100}</span>
+              ${matPic(m, 22)}${esc(m.name)}<span class="d">${Math.round(n * 100) / 100}</span>
             </button>`;
           }).join("")}
         </div>`).join("")
@@ -3336,7 +3406,7 @@ function orderSheet(preselectId) {
     <div class="slabel">Running low</div>
     ${low.length ? `<div class="card">${low.map(m => `<div class="inset">
         ${(() => { const c = balloonColor(m.name) || hueFor(m.name);
-          return `<span class="dot" style="width:22px;height:22px;background:${c}"></span>`; })()}
+          return matPic(m, 30); })()}
         <span class="b"><span class="n">${esc(m.name)}</span>
           <span class="s">${Math.round(onHandTotal(m.id) * 100) / 100} ${esc(m.unit || "each")} left · warn at ${m.reorder}</span></span>
         <button class="btn sec sm auto" data-order="${m.id}">Order some</button>
@@ -3406,6 +3476,114 @@ function orderSheet(preselectId) {
       }
     });
   });
+}
+
+/* ---------------------------- fixing a batch ----------------------------
+   A count or a price typed wrong shouldn't have to be deleted and re-entered —
+   and once something has been used from a batch it can't be. So a batch can be
+   edited in place. What's already been used from it stays used: the count can't
+   go below that. A changed cost is carried back onto every sale and write-off
+   that drew from the batch, so the money reports come out right too. */
+function lotUses(lotId) {
+  const hits = [];
+  const scan = (draws, onDiff) => { for (const d of (draws || [])) if (d.lotId === lotId) hits.push({ d, onDiff }); };
+  for (const sale of S.sales) for (const l of (sale.lines || [])) {
+    scan(l.draw, diff => { l.costTotal = m4((+l.costTotal || 0) + diff); sale.cost = m4((+sale.cost || 0) + diff); });
+    for (const u of (l.used || [])) scan(u.draw, diff => {
+      u.cost = m4((+u.cost || 0) + diff); l.costTotal = m4((+l.costTotal || 0) + diff); sale.cost = m4((+sale.cost || 0) + diff);
+    });
+  }
+  for (const w of S.writeoffs) {
+    scan(w.draw, diff => { w.cost = m4((+w.cost || 0) + diff); });
+    for (const u of (w.used || [])) scan(u.draw, diff => { w.cost = m4((+w.cost || 0) + diff); });
+  }
+  return hits;
+}
+function batchEditAsk(lot, unit, after) {
+  if (!lot) return;
+  const host = $("#confirms");
+  const used = Math.round(((+lot.qty || 0) - (+lot.remaining || 0)) * 1000) / 1000;
+  const st = { date: lot.date || todayISO(), qty: lot.qty, cost: +lot.unitCost || 0, note: lot.note || "", receipt: lot.receipt || "" };
+  const draw = () => {
+    host.innerHTML = `<div class="scrim confirm">
+      <div class="sheet narrow" role="dialog" aria-modal="true" style="max-width:520px">
+        <div class="shead"><h3>Fix this batch</h3>
+          <button class="pebble lg" data-bx aria-label="Close">${ICON.close}</button></div>
+        <div class="sbody">
+          <div class="rowf">
+            <label class="f"><span class="t">Date in</span><input type="date" id="beDate" value="${esc(st.date)}"></label>
+            <label class="f"><span class="t">How many came in</span>
+              <input type="number" id="beQty" inputmode="${qtyMode(unit)}" step="${qtyStep(unit)}" min="${used || 0}" value="${esc(st.qty)}"></label>
+            <label class="f"><span class="t">Cost each</span>
+              <input type="number" id="beCost" inputmode="decimal" step="0.001" min="0" value="${esc(st.cost)}"></label>
+          </div>
+          <label class="f"><span class="t">Note</span><input type="text" id="beNote" value="${esc(st.note)}"></label>
+          <div id="beRcpt">${receiptBlock(st.receipt)}</div>
+          <p class="note" id="beInfo" style="margin:12px 0 0"></p>
+        </div>
+        <div class="sfoot stack">
+          <button class="btn sec" id="beNo">Leave it</button>
+          <button class="btn" id="beGo">Save the batch</button>
+        </div>
+      </div></div>`;
+    const read = () => {
+      st.date = $("#beDate").value || st.date;
+      st.qty = $("#beQty").value === "" ? "" : qtyRound(+$("#beQty").value || 0, unit);
+      st.cost = Math.max(0, +$("#beCost").value || 0);
+      st.note = $("#beNote").value;
+    };
+    const info = () => {
+      read();
+      const n = lotUses(lot.id).length;
+      const bits = [];
+      if (used > 0) bits.push(`${used} of this batch ${used === 1 ? "has" : "have"} already been used or sold, so it can't go below ${used}.`);
+      if (st.qty !== "" && +st.qty >= used) bits.push(`That leaves ${Math.round((+st.qty - used) * 1000) / 1000} on the shelf.`);
+      if (n && Math.abs(st.cost - (+lot.unitCost || 0)) > 1e-9)
+        bits.push(`The new cost is carried back onto the ${n === 1 ? "sale or write-off" : n + " sales and write-offs"} that already used it.`);
+      $("#beInfo").innerHTML = bits.join(" ");
+      $("#beInfo").style.color = st.qty !== "" && +st.qty < used ? "var(--warn-ink)" : "";
+    };
+    info();
+    ["#beQty", "#beCost"].forEach(id => $(id).oninput = info);
+    const box = $("#beRcpt");
+    bindReceiptIn(box, () => st.receipt, v => { st.receipt = v; }, () => { read(); draw(); });
+    const close = () => { host.innerHTML = ""; };
+    host.querySelector(".scrim").addEventListener("click", e => { if (e.target.classList.contains("scrim")) close(); });
+    host.querySelector("[data-bx]").onclick = close;
+    $("#beNo").onclick = close;
+    $("#beGo").onclick = async () => {
+      read();
+      if (st.qty === "" || !(+st.qty > 0)) { toast("How many came in?"); return; }
+      if (+st.qty < used - 1e-9) { toast("At least " + used + " — that many are already used"); return; }
+      const diffEach = st.cost - (+lot.unitCost || 0);
+      if (Math.abs(diffEach) > 1e-9) {
+        const touched = new Set();
+        for (const h of lotUses(lot.id)) {
+          h.onDiff(h.d.qty * diffEach);
+          h.d.unitCost = st.cost;
+        }
+        for (const sale of S.sales) {
+          if (!(sale.lines || []).some(l => (l.draw || []).concat(...(l.used || []).map(u => u.draw || [])).some(d => d.lotId === lot.id))) continue;
+          for (const l of sale.lines) if (l.qty) l.cost = m4((+l.costTotal || 0) / l.qty);
+          sale.profit = m4(sale.total - saleTax(sale) - saleFee(sale) - sale.cost);
+          touched.add(sale);
+        }
+        for (const sale of touched) await salePut(sale);
+        await saveWriteoffs();
+      }
+      lot.date = st.date;
+      lot.qty = +st.qty;
+      lot.remaining = Math.round((+st.qty - used) * 1000) / 1000;
+      lot.unitCost = st.cost;
+      lot.note = st.note.trim();
+      lot.receipt = st.receipt;
+      await saveLots();
+      close();
+      if (after) after();
+      toast("Batch saved");
+    };
+  };
+  draw();
 }
 
 /* an order arriving becomes a batch, at whatever it actually cost */
@@ -3564,6 +3742,7 @@ function movementList(stockId, unit, only, canDelete) {
       <span class="b"><span class="n">${esc(m.label)}</span>
         <span class="s">${esc(fmtDate(m.date, true) || "—")}${m.detail ? " · " + esc(m.detail) : ""}</span></span>
       <span class="r">${esc(cur(Math.abs(m.cost)))}</span>
+      ${canDelete && m.lot ? `<button class="tlink" data-lotedit="${m.lot.id}">Edit</button>` : ""}
       ${canDelete && m.lot && m.lot.qty === m.lot.remaining ? `<button class="xbtn" data-mlx="${m.lot.id}" aria-label="Delete batch">✕</button>` : ""}
     </div>`).join("")}
     ${t.agrees ? "" : `<p class="note" style="margin:10px 0 0;color:var(--warn-ink)">These add up to ${t.expected} ${esc(u)} but the shelf says ${t.actual}. Usually a batch was deleted after something had been used from it, or a backup was loaded mid-season.</p>`}`;
@@ -3821,7 +4000,7 @@ function productCard(it) {
   const est = recipeCostEstimate(it);
   const cost = est === null ? (+it.cost || 0) : est;
   const sn = stockNote(it);
-  const from = (it.recipe || []).map(r => r.category).filter(Boolean).join(" + ");
+  const from = (it.recipe || []).map(r => lineTypes(r).join(" or ")).filter(Boolean).join(" + ");
   const chips = [];
   if (sn && sn.warn) chips.push('<span class="chip">Nearly out</span>');
   if (it.stockMode === "item") chips.push(`<span class="chip neutral">${onHandTotal(it.id)} made up</span>`);
@@ -3837,7 +4016,7 @@ function productCard(it) {
 function renderItems() {
   const p = $("#pItems");
   const q = S.makeQ || "";
-  const match = it => hits(q, it.name, (it.recipe || []).map(r => r.category).join(" "),
+  const match = it => hits(q, it.name, (it.recipe || []).map(r => lineTypes(r).join(" ")).join(" "),
     (it.recipe || []).flatMap(r => lineMats(r).map(m => m.name)).join(" "));
   const shown = S.items.filter(match);
 
@@ -3877,6 +4056,7 @@ function materialCard(m) {
     <span class="big">${Math.round(n * 100) / 100} ${esc(m.unit || "each")} left</span>
     <span class="s">${used ? "in " + used + (used === 1 ? " thing" : " things") : "not used yet"}${(+m.reorder || 0) ? "<br>Reorder under " + m.reorder : ""}</span>
     ${chips.length ? `<span class="chips">${chips.join("")}</span>` : ""}
+    <span class="pill">${S.lots.some(l => lotRef(l) === m.id) ? esc(costWord(costNow(m.id), m.unit)) : "no cost yet"}</span>
   </button>`;
 }
 
@@ -3924,6 +4104,7 @@ function renderStock() {
     ${live.map(([cat, ms]) => `
       <div class="typehead">
         <span class="sect" style="margin:0">${esc(cat)}</span>
+        <button class="tlink" data-typeuse="${esc(cat)}">Use in makes</button>
         <button class="tlink" data-typeoff="${esc(cat)}">Make inactive</button>
         ${(byCat[cat] || []).length ? "" : `<button class="tlink x" data-typedel="${esc(cat)}" aria-label="Delete ${esc(cat)}">✕</button>`}
       </div>
@@ -3953,6 +4134,7 @@ function renderStock() {
   $("#addSupply").onclick = () => materialSheet(null);
   if ($("#kpiLow")) $("#kpiLow").onclick = () => orderSheet();
   if ($("#toggleOff")) $("#toggleOff").onclick = () => { S.showInactive = !S.showInactive; renderStock(); };
+  p.querySelectorAll("[data-typeuse]").forEach(b => b.onclick = () => typeUseSheet(b.dataset.typeuse, false));
   p.querySelectorAll("[data-typeoff]").forEach(b => b.onclick = async () => {
     await setTypeActive(b.dataset.typeoff, false); renderStock();
     toast(b.dataset.typeoff + " moved to inactive");
@@ -3977,6 +4159,137 @@ function renderStock() {
     });
   });
   p.querySelectorAll("[data-mat]").forEach(b => b.onclick = () => materialSheet(matById(b.dataset.mat)));
+}
+
+/* ---------------------------- a type across every make ----------------------------
+   Adding 260 Vibrant shouldn't mean opening every product to add it. This lists
+   every product with its boxes, exactly as its recipe has them, and a tick per
+   box. A tick puts the type in that box as another "or"; taking a tick off takes
+   it out. Nothing here ever adds a box — no product ends up needing one more
+   balloon because of a bulk tick. */
+const firstWord = t => String(t || "").trim().split(/\s+/)[0].toLowerCase();
+function typeUseSheet(type, isNew) {
+  const makes = S.items.filter(hasRecipe).slice().sort((a, b) => a.name.localeCompare(b.name));
+  const mine = matsIn(type);
+  const mineIds = mine.map(m => m.id);
+  const boxes = [];
+  for (const it of makes) it.recipe.forEach((rl, k) => {
+    const types = lineTypes(rl), has = types.includes(type);
+    /* which of this type's items the box takes today — none named means all */
+    const named = mineIds.filter(id => (rl.materials || []).includes(id));
+    const allowed = has && named.length ? named : mineIds.slice();
+    boxes.push({ it, rl, k, key: it.id + ":" + k, types, has, allowed,
+      only: has && types.length === 1,
+      suggested: !has && types.some(t => firstWord(t) === firstWord(type)) });
+  });
+  const tick = {}, sel = {};
+  for (const b of boxes) { tick[b.key] = b.has || (isNew && b.suggested); sel[b.key] = new Set(b.allowed); }
+  const allOn = b => mineIds.every(id => sel[b.key].has(id));
+  const selChanged = b => b.has && tick[b.key] && (sel[b.key].size !== b.allowed.length || b.allowed.some(id => !sel[b.key].has(id)));
+  const changes = () => {
+    let add = 0, drop = 0, edit = 0; const things = new Set();
+    for (const b of boxes) {
+      if (tick[b.key] !== b.has) { tick[b.key] ? add++ : drop++; things.add(b.it.id); }
+      else if (selChanged(b)) { edit++; things.add(b.it.id); }
+    }
+    return { add, drop, edit, things: things.size };
+  };
+
+  sheet(isNew ? "Use " + esc(type) + " in what you make?" : esc(type) + " in what you make",
+    '<div id="tuBody"></div>', [
+      { label: isNew ? "Not now" : "Leave it", cls: "btn sec", id: "tuNo" },
+      { label: "Save", cls: "btn", id: "tuGo" }
+    ], { narrow: true });
+
+  const draw = () => {
+    const c = changes();
+    const row = b => {
+      const on = !!tick[b.key];
+      const plus = on && !b.has, minus = !on && b.has;
+      const every = allOn(b);
+      const onlyNames = mine.filter(m => sel[b.key].has(m.id)).map(m => m.name).join(", ");
+      /* the box as it reads today, without this type */
+      const base = boxWords(b.rl, type);
+      const tail = on ? ` <span style="color:var(--green-dark);font-weight:700">${base ? "or " : ""}${esc(type)}${every ? "" : " (only " + esc(onlyNames) + ")"}</span>`
+        : (minus ? ` <s style="color:var(--warn-ink)">${base ? "or " : ""}${esc(type)}</s>` : "");
+      return `<div class="inset" style="display:block;background:var(--card);margin:0${b.only && !mine.length ? ";opacity:.75" : ""}">
+        <button class="tubox" data-tb="${esc(b.key)}" ${b.only ? "disabled" : ""}
+          style="display:flex;gap:12px;align-items:center;width:100%;text-align:left;background:none;padding:0">
+          <span class="tickbox ${on ? "on" : ""}" aria-hidden="true">${on ? "✓" : ""}</span>
+          <span class="b"><span class="n" style="font-size:15px;font-family:var(--body);font-weight:600">${base}${tail}</span>
+            <span class="s">uses ${+b.rl.qty || 0}${b.only ? " · it's the only type in this box, so it stays" : ""}</span></span>
+        </button>
+        ${on && mine.length ? `<div style="margin:10px 0 2px 40px">
+          <span class="t" style="display:block;font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-mute);margin-bottom:6px">Which ${esc(type)}${every ? " · all of them" : ""}</span>
+          <div class="togs">${mine.map(m => `<button class="tog sm" data-tbm="${esc(b.key)}|${esc(m.id)}" aria-pressed="${sel[b.key].has(m.id)}"
+            style="padding:6px 12px;font-size:14px">${matPic(m, 18)}${esc(m.name)}</button>`).join("")}</div></div>` : ""}
+      </div>`;
+    };
+    $("#tuBody").innerHTML = `
+      <p class="note">Each product is shown with its boxes, exactly as in its recipe. Tick a box and ${esc(type)} becomes
+        another <b>or</b> inside it; untick one and it comes out. Under each ticked box, pick which ${esc(type)} ones it
+        can use. Nothing is ever added as an <b>and</b> — no product ends up needing one more balloon.${
+        isNew ? " Boxes that already use a similar type are ticked for you." : ""}</p>
+      ${makes.length ? `<div class="togs" style="margin-bottom:14px">
+          <button class="tog sm" id="tuSug">Tick the suggested ones</button>
+          <button class="tog sm" id="tuNone">Untick all</button>
+          <button class="tog sm" id="tuReset">As it was</button>
+        </div>
+        ${makes.map(it => `<div class="grp" style="margin-bottom:10px">
+          <div style="font-family:var(--display);font-weight:700;font-size:18px;margin:0 0 8px 2px">${esc(it.name)}</div>
+          ${boxes.filter(b => b.it === it).map(row).join('<div class="andsep" style="margin:6px 0"><span>and</span></div>')}
+        </div>`).join("")}`
+      : '<p class="note">Nothing you make has a recipe yet, so there\'s nothing to add it to.</p>'}`;
+    const bx = n => n + " box" + (n === 1 ? "" : "es");
+    const parts = [c.add ? "add to " + bx(c.add) : "", c.drop ? "take off " + bx(c.drop) : "", c.edit ? "change " + bx(c.edit) : ""].filter(Boolean);
+    const label = parts.join(", ");
+    $("#tuGo").textContent = parts.length ? label.charAt(0).toUpperCase() + label.slice(1) + " in " + c.things + " thing" + (c.things === 1 ? "" : "s") : "Nothing to change";
+    all("[data-tb]").forEach(el => el.onclick = () => {
+      const x = boxes.find(y => y.key === el.dataset.tb);
+      if (!x || x.only) return;
+      tick[x.key] = !tick[x.key]; draw();
+    });
+    all("[data-tbm]").forEach(el => el.onclick = () => {
+      const [k, id] = el.dataset.tbm.split("|");
+      const s0 = sel[k];
+      if (s0.has(id) && s0.size === 1) { toast("Leave at least one — or untick the box"); return; }
+      s0.has(id) ? s0.delete(id) : s0.add(id);
+      draw();
+    });
+    if ($("#tuSug")) $("#tuSug").onclick = () => { for (const b of boxes) if (b.suggested) tick[b.key] = true; draw(); };
+    if ($("#tuNone")) $("#tuNone").onclick = () => { for (const b of boxes) if (!b.only) tick[b.key] = false; draw(); };
+    if ($("#tuReset")) $("#tuReset").onclick = () => {
+      for (const b of boxes) { tick[b.key] = b.has; sel[b.key] = new Set(b.allowed); }
+      draw();
+    };
+  };
+  draw();
+
+  $("#tuNo").onclick = closeSheet;
+  $("#tuGo").onclick = async () => {
+    const c = changes();
+    if (!c.add && !c.drop && !c.edit) { closeSheet(); return; }
+    for (const b of boxes) {
+      const rl = b.rl, on = tick[b.key];
+      if (on === b.has && !selChanged(b)) continue;
+      if (!on) {
+        rl.types = lineTypes(rl).filter(t => t !== type);
+        rl.materials = (rl.materials || []).filter(id => !mineIds.includes(id));
+      } else {
+        if (!b.has) rl.types = lineTypes(rl).concat([type]);
+        /* limits are per type: all of them on means nothing named for this type,
+           and the other types in the box are never touched */
+        const othersNow = (rl.materials || []).filter(id => !mineIds.includes(id));
+        rl.materials = allOn(b) ? othersNow : othersNow.concat([...sel[b.key]]);
+      }
+      rl.category = rl.types[0] || "";
+    }
+    for (const it of makes) it.cost = Math.round((recipeCostEstimate(it) || 0) * 1000) / 1000;
+    await saveItems();
+    closeSheet(); refreshLists();
+    toast(type + ": " + [c.add ? "added to " + c.add : "", c.drop ? "taken off " + c.drop : "", c.edit ? "changed in " + c.edit : ""]
+      .filter(Boolean).join(", ") + " box" + ((c.add + c.drop + c.edit) === 1 ? "" : "es"));
+  };
 }
 
 /* the list of types, so one can be added without a supply to hang it on */
@@ -4279,6 +4592,8 @@ function materialSheet(existing) {
       await saveLots(); draw(); refreshLists();
       toast(q + " added");
     };
+    document.querySelectorAll("[data-lotedit]").forEach(b => b.onclick = () =>
+      batchEditAsk(S.lots.find(l => l.id === b.dataset.lotedit), m.unit, () => { redraw(); refreshLists(); }));
     document.querySelectorAll("[data-mlx]").forEach(b => b.onclick = () => {
       const lot = S.lots.find(l => l.id === b.dataset.mlx);
       confirmAsk({
@@ -4342,6 +4657,10 @@ function materialSheet(existing) {
     m.unit = m.unit || "each";
     if (!m.name) { alert("Give it a name."); return; }
     if (!m.category) { alert("Give it a type — that's how recipes find it."); return; }
+    /* the first material in a type — a brand-new type, or one that was empty —
+       offers to go into what you make straight away */
+    const firstOfType = (!existing || existing.category !== m.category)
+      && !S.materials.some(x => x.id !== m.id && x.category === m.category);
     if (!S.categories.includes(m.category)) {
       S.categories = S.categories.concat([m.category]).sort();
       await saveCategories();
@@ -4362,6 +4681,7 @@ function materialSheet(existing) {
     }
     await saveMaterials();
     closeSheet(); refreshLists();
+    if (firstOfType && S.items.some(hasRecipe)) typeUseSheet(m.category, true);
   };
 
   if ($("#matDel")) $("#matDel").onclick = () => {
@@ -4430,11 +4750,8 @@ function itemSheet(item) {
       };
     }
   };
-  /* types this recipe hasn't claimed yet */
-  const freeTypes = () => {
-    const used = it.recipe.map(r => r.category).filter(Boolean);
-    return matCategories().filter(c => !used.includes(c));
-  };
+  /* old lines named one type; every line now carries a list */
+  for (const rl of it.recipe) if (!Array.isArray(rl.types)) rl.types = lineTypes(rl);
 
   const draw = () => {
     const cats = matCategories();
@@ -4444,7 +4761,7 @@ function itemSheet(item) {
       if (per <= 0 || !ms.length) return null;
       const avg = ms.reduce((acc, m) => acc + lastCost(m.id), 0) / ms.length;
       return {
-        label: per + " × " + (rl.category || "?") + (ms.length > 1 ? " (average of " + ms.length + ")" : " · " + ms[0].name),
+        label: per + " × " + lineLabel(rl) + (ms.length > 1 ? " (average of " + ms.length + ")" : " · " + ms[0].name),
         cost: per * avg
       };
     }).filter(Boolean);
@@ -4473,13 +4790,13 @@ function itemSheet(item) {
         always what the batches it drew on actually cost.</p>
 
       <div class="sect">What it's made from</div>
-      <p class="note">One line per material it uses. Name the type, then the particular ones this
-        product may use — leave those blank and any of that type will do.</p>
+      <p class="note">Each box is one thing it needs, and it needs all of them. Add more types to a box with
+        <b>+ or another type</b> when any of them would do.</p>
       ${!S.materials.length ? '<p class="note" style="color:var(--warn-ink)">No materials yet. Add them under Inventory first.</p>' : ""}
       <div id="recipeBox"></div>
-      ${freeTypes().length
-        ? '<button class="btn sec sm" id="addLine" style="margin-bottom:6px">Add a material</button>'
-        : `<p class="note">Every type is already on the list. Add another type under Inventory if you need one.</p>`}
+      ${matCategories().length
+        ? `<button class="btn sec sm" id="addLine" style="margin-bottom:6px">${it.recipe.length ? "+ And another thing it needs" : "+ Add what it's made from"}</button>`
+        : `<p class="note">Add a type of material under Inventory first.</p>`}
 
       <div class="sect">Anything else</div>
       <div class="togs" style="margin-bottom:10px">
@@ -4498,41 +4815,76 @@ function itemSheet(item) {
   const drawRecipe = () => {
     const cats = matCategories();
     const box = $("#recipeBox");
+    const label = t => `<span class="t" style="display:block;font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-mute);margin:10px 0 6px">${t}</span>`;
     box.innerHTML = it.recipe.map((rl, i) => {
-      const inType = matsIn(rl.category);
+      const types = lineTypes(rl);
+      const inTypes = types.flatMap(t => matsIn(t));
       const chosen = rl.materials || [];
-      return `<div class="grp">
-        <div class="rowf" style="align-items:flex-end">
-          <label class="f" style="margin:0"><span class="t">Type</span>
-            <select data-rcat="${i}">
-              <option value="">— choose —</option>
-              ${cats.filter(c => c === rl.category || !it.recipe.some((o, j) => j !== i && o.category === c))
-                .map(c => `<option value="${esc(c)}" ${rl.category === c ? "selected" : ""}>${esc(c)} (${matsIn(c).length})</option>`).join("")}
+      const unit = (inTypes[0] || {}).unit;
+      /* one dropdown per type: the first carries How many, the rest read "or".
+         A box with a single type looks exactly as it always did. */
+      const rows = (types.length ? types : [""]).map((ty, k) => {
+        const taken = types.filter((x, n) => n !== k);
+        const ofType = ty ? matsIn(ty) : [];
+        const named = ofType.filter(m => chosen.includes(m.id));
+        return `<div class="rowf" style="align-items:flex-end;margin-bottom:6px">
+          <label class="f" style="margin:0">${k ? '<span class="t" style="color:var(--green-dark)">or</span>' : '<span class="t">Type</span>'}
+            <select data-rtype="${i}:${k}">
+              ${ty ? "" : '<option value="">— choose —</option>'}
+              ${cats.filter(c => !taken.includes(c))
+                .map(c => `<option value="${esc(c)}" ${c === ty ? "selected" : ""}>${esc(c)} (${matsIn(c).length})</option>`).join("")}
             </select></label>
-          <label class="f" style="margin:0;flex:0 0 120px"><span class="t">How many</span>
-            <input type="number" data-rqty="${i}" inputmode="${qtyMode((inType[0] || {}).unit)}"
-              step="${qtyStep((inType[0] || {}).unit)}" min="0" value="${rl.qty != null ? rl.qty : 1}"></label>
-          <button class="xbtn" data-rx="${i}" style="flex:0 0 44px" aria-label="Remove line">✕</button>
+          ${k ? '<span style="flex:0 0 120px;min-width:120px"></span>'
+              : `<label class="f" style="margin:0;flex:0 0 120px"><span class="t">How many</span>
+                  <input type="number" data-rqty="${i}" inputmode="${qtyMode(unit)}"
+                    step="${qtyStep(unit)}" min="0" value="${rl.qty != null ? rl.qty : 1}"></label>`}
+          <button class="xbtn" ${k ? `data-rtx="${i}:${k}" aria-label="Take ${esc(ty)} off"` : `data-rx="${i}" aria-label="Remove this box"`}
+            style="flex:0 0 44px;min-width:44px">✕</button>
         </div>
-        ${rl.category ? `
-          <span class="t" style="display:block;font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-mute);margin:10px 0 6px">
-            Which ones can it use${chosen.length ? "" : " · any of them"}</span>
+        ${ty ? `<div class="whichrow">
+          ${label("Which " + esc(ty) + (named.length ? "" : " · any of them"))}
           <div class="togs" data-rmats="${i}">
-            ${inType.length ? inType.map(m => `<button class="tog sm" data-mid="${esc(m.id)}" aria-pressed="${chosen.includes(m.id)}">
-                ${colorDot(balloonColor(m.name) || hueFor(m.name), 16)}${esc(m.name)}</button>`).join("")
-              : `<p class="note" style="margin:0">Nothing filed under ${esc(rl.category)} yet.</p>`}
-          </div>` : ""}
+            ${ofType.length ? ofType.map(m => `<button class="tog sm" data-mid="${esc(m.id)}" aria-pressed="${chosen.includes(m.id)}">
+                ${matPic(m, 22)}${esc(m.name)}</button>`).join("")
+              : `<p class="note" style="margin:0">Nothing filed under ${esc(ty)} yet.</p>`}
+          </div></div>` : ""}`;
+      }).join("");
+      const more = types.length && cats.some(c => !types.includes(c));
+      return `${i ? '<div class="andsep"><span>and</span></div>' : ""}
+      <div class="grp">
+        ${rows}
+        ${more ? `<button class="tlink" data-rtadd="${i}" style="margin:2px 0 4px">+ or another type</button>` : ""}
+        ${types.length ? `
+          ${lineSplits(rl) ? '<p class="note" style="margin:8px 0 0">Uses more than one, so at the counter you can take them all the same or mix them.</p>' : ""}` : ""}
       </div>`;
     }).join("");
 
-    box.querySelectorAll("[data-rcat]").forEach(el => el.onchange = () => {
-      const rl = it.recipe[+el.dataset.rcat];
-      rl.category = el.value; rl.materials = [];
+    const setTypes = (rl, types) => {
+      rl.types = types.filter(Boolean);
+      rl.category = rl.types[0] || "";
+      /* a material from a type that's been taken off can't stay picked */
+      rl.materials = (rl.materials || []).filter(id => { const m = matById(id); return m && rl.types.includes(m.category); });
+    };
+    box.querySelectorAll("[data-rtype]").forEach(el => el.onchange = () => {
+      const [i, k] = el.dataset.rtype.split(":").map(Number);
+      const rl = it.recipe[i], types = lineTypes(rl).slice();
+      types[k] = el.value;
+      setTypes(rl, types); readTop(); draw();
+    });
+    box.querySelectorAll("[data-rtx]").forEach(b2 => b2.onclick = () => {
+      const [i, k] = b2.dataset.rtx.split(":").map(Number);
+      const rl = it.recipe[i];
+      setTypes(rl, lineTypes(rl).filter((x, n) => n !== k)); readTop(); draw();
+    });
+    box.querySelectorAll("[data-rtadd]").forEach(b2 => b2.onclick = () => {
+      const rl = it.recipe[+b2.dataset.rtadd], types = lineTypes(rl);
+      const next = cats.find(c => !types.includes(c));
+      if (next) setTypes(rl, types.concat([next]));
       readTop(); draw();
     });
     box.querySelectorAll("[data-rqty]").forEach(el => el.oninput = () => {
       const rl = it.recipe[+el.dataset.rqty];
-      const u = (matsIn(rl.category)[0] || {}).unit;
+      const u = (lineMats(rl)[0] || {}).unit;
       rl.qty = qtyRound(+el.value || 0, u);
     });
     box.querySelectorAll("[data-rqty]").forEach(el => el.onchange = () => { readTop(); draw(); });
@@ -4578,6 +4930,7 @@ function itemSheet(item) {
         <span class="b"><span class="n">${esc(fmtDate(l.date, true))}</span>
           <span class="s">${l.remaining} of ${l.qty} left at ${esc(cur(+l.unitCost || 0))} each</span></span>
         <span class="r">${esc(cur(l.remaining * (+l.unitCost || 0)))}</span>
+        <button class="tlink" data-lotedit="${l.id}">Edit</button>
         ${l.qty === l.remaining ? `<button class="xbtn" data-lotx="${l.id}" aria-label="Delete batch">✕</button>` : ""}
       </div>`).join("")}</div>` : ""}`;
 
@@ -4599,6 +4952,8 @@ function itemSheet(item) {
       await saveLots(); readTop(); draw(); refreshLists();
       toast(q + " added");
     };
+    box.querySelectorAll("[data-lotedit]").forEach(b2 => b2.onclick = () =>
+      batchEditAsk(S.lots.find(l => l.id === b2.dataset.lotedit), "each", () => { readTop(); draw(); refreshLists(); }));
     box.querySelectorAll("[data-lotx]").forEach(b2 => b2.onclick = () => {
       const lot = S.lots.find(l => l.id === b2.dataset.lotx);
       confirmAsk({
@@ -4617,7 +4972,7 @@ function itemSheet(item) {
   const bindTop = () => {
     if ($("#addLine")) $("#addLine").onclick = () => {
       readTop();
-      it.recipe.push({ id: uid(), category: freeTypes()[0] || "", materials: [], qty: 1 });
+      it.recipe.push({ id: uid(), types: [], category: "", materials: [], qty: 1 });
       draw();
     };
     $("#iPre").onclick = async () => {
@@ -4645,7 +5000,8 @@ function itemSheet(item) {
       S.productTypes = S.productTypes.concat([it.type]).sort();
       await saveProductTypes();
     }
-    it.recipe = it.recipe.filter(r => r.category && (+r.qty || 0) > 0);
+    it.recipe = it.recipe.filter(r => lineTypes(r).length && (+r.qty || 0) > 0);
+    for (const r of it.recipe) { r.types = lineTypes(r); r.category = r.types[0]; }
     it.cost = Math.round((recipeCostEstimate(it) || 0) * 1000) / 1000;
     const i = S.items.findIndex(x => x.id === it.id);
     if (i >= 0) S.items[i] = it; else S.items.push(it);
@@ -4973,7 +5329,7 @@ function reportTakings() {
     </div>
     <div class="bars">${popShown.map(([k, v]) => `
       <div class="bar pop">
-        <span class="l"><span class="pn">${colorDot(popColor(k, v), 12)}<b>${esc(k)}</b></span>
+        <span class="l"><span class="pn"><b>${esc(k)}</b></span>
           <span class="ps">${popNote(v)}</span></span>
         <span class="t"><i style="width:${Math.max(2, Math.round(v.qty / popMax * 100))}%;background:${popColor(k, v)}"></i></span>
         <span class="v">${v.qty}${RF.pop === "mats" && v.unit && v.unit !== "each" ? " " + esc(v.unit) : ""}</span>

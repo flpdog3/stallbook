@@ -116,16 +116,18 @@ managed like Inventory types. Materials you sell as they come appear under their
 ### More than one ticket
 
 Two people serving means two sales on the go. With one ticket it sits on the far right as
-usual. Add a second and the other tickets move into a narrow column on the far right, with
-the one you're working on — **outlined in green** — to its left.
+usual. Add a second and the others become a row of small tabs **above** the one you're
+working on, which stays **outlined in green** and keeps its full width, so names, prices and
+the pay buttons never get squeezed.
 
-Each waiting ticket shows its name, total and the first three things on it ("1× Balloon dog
-· Blue"), with "+2 more" if there are others, so you can tell two tickets apart at a glance.
-That column scrolls, so a busy stall doesn't squash them down to nothing.
+Each tab shows the ticket's name, its total and the first thing on it ("2× Balloon dog"), so
+you can tell tickets apart at a glance. The tabs wrap onto a second and third row rather than
+running off the edge, so up to six tickets are all in sight at once on an iPad. Past that,
+swipe the tabs up to see the rest.
 
-Tap a waiting ticket to make it the open one, **+ Another** to start a fresh one, and the
-**✕** on the open one to close it (it asks first if anything's on it). There is always at
-least one. Tickets survive a reload.
+Tap a tab to make it the open ticket, **+ New** at the front of the row to start a fresh
+one, and the **✕** on the open one to close it (it asks first if anything's on it). There is
+always at least one. Tickets survive a reload.
 
 Every line lists what was made and the material chosen — "Balloon dog · Red".
 
@@ -351,14 +353,59 @@ Each product picks one of four:
 - **It's made from materials** — give it a **recipe**, and a sale consumes the materials
   rather than a finished unit.
 
-A recipe line is either **a choice from a category** ("1 of any 260 balloon"), decided at
-the counter, or **this exact material** ("0.5 m of curling ribbon", every time). Add a new
-colour to your materials and every recipe that says "any 260 balloon" can use it
-immediately — no recipe editing.
+**What it's made from** is a list of boxes, and it reads as AND and OR:
 
-**Quantity can change with one option layer.** Set "Quantity changes with: Size" on the
-balloon line and give Jumbo a 2, and a Jumbo takes two balloons while the ribbon line
-stays at 0.5. Each line varies by at most one layer, which keeps it unambiguous.
+- **Boxes are AND.** Each box is one thing the product needs, and it needs all of them.
+  They're shown with **AND** between them.
+- **Inside a box is OR.** A box starts with one **Type** dropdown and **How many**, just as
+  before. **+ or another type** adds another dropdown to the same box, marked **or** — 260
+  or 260 Mirror or 260 Pastel — and it takes any one of them. The ✕ on an **or** row takes
+  just that type off; the ✕ on the first row removes the whole box.
+- **Each type has its own "Which" row**, directly under its dropdown — **Which 260**, **Which
+  260 Mirror** — listing only that type's colours. Leave a row alone and the box takes any of
+  that type; tap a few to limit that type to just those. Limits are per type: naming Red
+  under 260 doesn't touch 260 Mirror, which still takes any of its own.
+
+So a balloon dog is one box: 260 or 260 Mirror or 260 Pastel, how many 1. A wand is two
+boxes: 260 or 260 Mirror or 260 Pastel, **and** a 5" balloon. Add a new colour to a type
+and every recipe that uses the type can use it straight away — no recipe editing.
+
+**A box that uses 2 or more can be mixed.** A sword that takes 2 from the 260s can be two
+White or one White and one Red. At the counter each tap means "one more of this": start
+with two White, tap Red and it's White + Red; tap Red again and it's two Red. The buttons
+show the count — **1× White**, **1× Red** — and the sale takes exactly those out of stock.
+
+### A type across everything you make
+
+Adding **260 Vibrant** shouldn't mean opening every product to add it. Save the first
+material in a new type (or in a type that had nothing in it) and **Use 260 Vibrant in what
+you make?** comes up by itself. You can also open it any time with **Use in makes** on any
+type heading in Inventory, for a type you already have.
+
+It lists every product with its boxes, exactly as in its recipe, with **AND** between them
+and a tick per box:
+
+- **Tick a box** and the type becomes another **or** inside it — the wand's stick box reads
+  "260 or 260 Mirror or 260 Pastel **or 260 Vibrant**" before you save. **Untick** one and it
+  comes out again.
+- **It never adds an and.** No product ends up needing one more balloon because of a bulk
+  tick; adding a whole new box is done in the product's own editor.
+- For a new type, boxes that already use a type starting the same way (any "260 …") are
+  ticked for you. For a type you already have, it opens showing where it's used now.
+  **Tick the suggested ones**, **Untick all** and **As it was** do what they say.
+- **Under each ticked box, pick which of the type's items it can use** — Lime, Teal, Coral —
+  all on to start with. The dog can take every Vibrant while the wand takes only Lime; the
+  box line reads "or 260 Vibrant (only Lime)" before you save. Opened for a type you already
+  have, it shows what each box allows today, and you can change it.
+- Leave them all on and that type isn't limited: the box takes any of them, including
+  colours added later. Turning some off limits only that type — the box's other types keep
+  whatever they had, limits and all. At least one has to stay on; untick the box to take the
+  type out.
+- A box where that type is the only one can't be unticked — the box would be left empty.
+  Change it in the product's editor instead.
+
+Adding another colour to a type that's already there doesn't ask anything: every box using
+that type picks the new colour up by itself.
 
 ### What's in the kit
 
@@ -650,6 +697,10 @@ pinch or use the slider to zoom, and the square you see is the square the card s
 **Show the whole photo** zooms out so nothing is cut off, for a wide picture that only makes
 sense entire. **Fill the square** puts it back to the middle.
 
+Wherever a material or product is listed by name — picking colours at the counter, the
+options on a price sheet, **What it's made from**, the ticket — its photo sits beside the name,
+small. With no photo there's nothing there at all; the app no longer guesses a colour.
+
 To change it later, tap the picture in the editor, or the **Frame it** button beside it. The
 full picture is kept behind the square, so re-framing never loses anything — you're always
 working from the original, not from an already-cropped copy.
@@ -744,6 +795,17 @@ Open any material and it's in sections:
   note.
 - **Add a batch**, **Write-offs** and **Where it went** are collapsed until you need them.
 
+### Fixing a batch
+
+Typed 50 when 60 came in, or $0.10 when it was $0.12? **Edit** on the batch's row in
+**Where it went** lets you change the date, how many came
+in, the cost each, the note and the receipt. The material's sheet stays open underneath.
+
+Anything already used or sold from the batch stays used: the count can't go below that, and
+what's left on the shelf is worked out from the new count. Change the cost and it's carried
+back onto every sale and write-off that already drew from that batch, so the money reports
+come out right rather than just future sales.
+
 ### Where it went
 
 Open any material, expand **Where it went**, and there's a dated history of every unit in
@@ -752,8 +814,8 @@ what it cost each, the note), what got made from it and at which market, giveawa
 labelled as such, and anything written off with its reason. Filter it by **Batches**,
 **Written off** or **Sales**.
 
-A batch nothing has been used from still carries an ✕ to delete it, for when you mistype
-one. Four totals sit above it: on the shelf, bought in, made into
+Every batch row has **Edit** for fixing a count or a cost, and one nothing has been used
+from still carries an ✕ to delete it. Four totals sit above it: on the shelf, bought in, made into
 things, written off.
 
 Those totals reconcile. If bought-in minus used minus written-off doesn't match the shelf,
@@ -773,8 +835,10 @@ Both Inventory and Make show compact cards with a search box above them. Invento
 names, types and units; Make searches names, the types a product uses and the materials it
 names.
 
-An Inventory card shows what's left, how many things use it, and the reorder level if one
-is set — plus a chip when it's nearly out, on its way, or left at home. A Make card shows
+An Inventory card shows what's left, how many things use it, the reorder level if one is
+set, and at the bottom **what one costs right now** — "$0.10 each", "$0.50 a metre". That's
+the batch the next one will come out of, since stock is used oldest first. Plus a chip when
+it's nearly out, on its way, or left at home. A Make card shows
 what it's built from, how many you could make, and what one costs.
 
 ### A material's screen
@@ -791,11 +855,11 @@ Five sections, the first two open:
 - **Write-offs** — collapsed; the form plus everything written off so far.
 - **Where it went** — collapsed; filter by Everything, Batches, Sales or Written off.
   Batch rows are titled **Batch purchased** and carry what's left, the price and the note,
-  with an ✕ to delete one nothing has been used from.
+  with **Edit** to fix one and an ✕ to delete one nothing has been used from.
 
 ### Tidying types
 
-Each type heading on the Inventory tab carries **Make inactive**, which folds it and its
+Each type heading on the Inventory tab carries **Use in makes** (above) and **Make inactive**, which folds it and its
 materials into a collapsed **Inactive** section at the bottom. Nothing is lost — stock,
 history and the Nearly out count all carry on exactly as before; it's only out of the way.
 **Make active** brings it back.
